@@ -3,6 +3,7 @@ import { supabase } from './lib/supabase';
 import Auth from './components/Auth';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
+import Todos from './pages/Todos';
 import Placeholder from './pages/Placeholder';
 import S from './S';
 
@@ -51,7 +52,7 @@ export default function App() {
   function renderPage() {
     switch (page) {
       case 'dashboard': return <Dashboard user={user} />;
-      case 'todos':     return <Placeholder title="To-Do Lists" />;
+      case 'todos':     return <Todos user={user} />;
       case 'calendar':  return <Placeholder title="Calendar" />;
       case 'finances':  return <Placeholder title="Finances" />;
       case 'goals':     return <Placeholder title="Goals" />;
@@ -73,7 +74,9 @@ export default function App() {
             <div style={S.avatar}>{initials}</div>
           </div>
         </div>
-        {renderPage()}
+        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+          {renderPage()}
+        </div>
       </div>
     </div>
   );
