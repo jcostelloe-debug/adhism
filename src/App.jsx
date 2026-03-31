@@ -4,6 +4,7 @@ import Auth from './components/Auth';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Todos from './pages/Todos';
+import Calendar from './pages/Calendar';
 import Placeholder from './pages/Placeholder';
 import S from './S';
 
@@ -53,7 +54,7 @@ export default function App() {
     switch (page) {
       case 'dashboard': return <Dashboard user={user} />;
       case 'todos':     return <Todos user={user} />;
-      case 'calendar':  return <Placeholder title="Calendar" />;
+      case 'calendar':  return <Calendar user={user} />;
       case 'finances':  return <Placeholder title="Finances" />;
       case 'goals':     return <Placeholder title="Goals" />;
       default:          return <Dashboard user={user} />;
