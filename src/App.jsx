@@ -5,6 +5,7 @@ import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Todos from './pages/Todos';
 import Calendar from './pages/Calendar';
+import Finances from './pages/Finances';
 import Placeholder from './pages/Placeholder';
 import S from './S';
 
@@ -55,7 +56,7 @@ export default function App() {
       case 'dashboard': return <Dashboard user={user} />;
       case 'todos':     return <Todos user={user} />;
       case 'calendar':  return <Calendar user={user} />;
-      case 'finances':  return <Placeholder title="Finances" />;
+      case 'finances':  return <Finances user={user} />;
       case 'goals':     return <Placeholder title="Goals" />;
       default:          return <Dashboard user={user} />;
     }
