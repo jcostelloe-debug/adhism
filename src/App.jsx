@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Todos from './pages/Todos';
 import Calendar from './pages/Calendar';
 import Finances from './pages/Finances';
+import Goals from './pages/Goals';
 import Placeholder from './pages/Placeholder';
 import S from './S';
 
@@ -57,7 +58,7 @@ export default function App() {
       case 'todos':     return <Todos user={user} />;
       case 'calendar':  return <Calendar user={user} />;
       case 'finances':  return <Finances user={user} />;
-      case 'goals':     return <Placeholder title="Goals" />;
+      case 'goals':     return <Goals user={user} />;
       default:          return <Dashboard user={user} />;
     }
   }
