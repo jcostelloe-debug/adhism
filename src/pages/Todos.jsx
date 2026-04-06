@@ -103,29 +103,25 @@ export default function Todos({ user }) {
 
   useEffect(() => { loadLists(); }, [loadLists]);
 
-  // Load todos for selected list
+  // Load all todos for the user (so sidebar counts are always visible)
   const loadTodos = useCallback(async () => {
-    if (!selectedId) return;
     if (online) {
       const { data, error } = await supabase
         .from('todos')
         .select('*')
         .eq('user_id', user.id)
-        .eq('list_id', selectedId)
         .order('created_at', { ascending: false });
 
       if (!error && data) {
         setTodos(data);
-        await db.todos.where('list_id').equals(selectedId).delete();
+        await db.todos.where('user_id').equals(user.id).delete();
         await db.todos.bulkAdd(data.map((t) => ({ ...t, synced: 1 })));
       }
     } else {
-      const local = await db.todos
-        .where('list_id').equals(selectedId)
-        .toArray();
+      const local = await db.todos.where('user_id').equals(user.id).toArray();
       setTodos(local.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
     }
-  }, [selectedId, online, user.id]);
+  }, [online, user.id]);
 
   useEffect(() => { loadTodos(); }, [loadTodos]);
 
@@ -216,6 +212,7 @@ export default function Todos({ user }) {
 
   const selectedList = lists.find((l) => l.id === selectedId);
   const filtered = todos.filter((t) => {
+    if (t.list_id !== selectedId) return false;
     if (filter === 'Active') return !t.done;
     if (filter === 'Done') return t.done;
     return true;
