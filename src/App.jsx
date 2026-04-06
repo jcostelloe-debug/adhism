@@ -8,6 +8,7 @@ import Calendar from './pages/Calendar';
 import Finances from './pages/Finances';
 import Goals from './pages/Goals';
 import Placeholder from './pages/Placeholder';
+import UpdateBanner from './components/UpdateBanner';
 import S from './S';
 
 function formatDate(d) {
@@ -65,6 +66,7 @@ export default function App() {
 
   return (
     <div style={S.app}>
+      <UpdateBanner />
       <Sidebar page={page} setPage={setPage} />
       <div style={S.main}>
         <div style={S.topbar}>

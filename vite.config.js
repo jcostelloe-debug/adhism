@@ -6,14 +6,14 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       includeAssets: ['favicon.ico', 'apple-touch-icon.png'],
       manifest: {
         name: 'ADHism',
         short_name: 'ADHism',
         description: 'Schedule, finances, goals and daily focus',
-        theme_color: '#a78bfa',
-        background_color: '#0f0f13',
+        theme_color: '#6d5fc7',
+        background_color: '#f5f3f0',
         display: 'standalone',
         icons: [
           { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
