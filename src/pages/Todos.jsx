@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import { db, queueMutation } from '../lib/db';
 import S from '../S';
@@ -34,6 +34,7 @@ function formatDue(due) {
 export default function Todos({ user }) {
   const [lists, setLists] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
+  const seedingRef = useRef(false);
   const [todos, setTodos] = useState([]);
   const [filter, setFilter] = useState('All');
   const [input, setInput] = useState('');
@@ -62,8 +63,21 @@ export default function Todos({ user }) {
         .order('created_at');
 
       if (!error && data) {
+        // Deduplicate by name — keep earliest created, delete the rest
+        const seen = new Map();
+        const dupes = [];
+        for (const l of data) {
+          if (seen.has(l.name)) dupes.push(l.id);
+          else seen.set(l.name, l);
+        }
+        if (dupes.length > 0) {
+          await Promise.all(dupes.map(id => supabase.from('lists').delete().eq('id', id)));
+        }
+        const clean = data.filter(l => !dupes.includes(l.id));
+
         // Seed default lists on first use
-        if (data.length === 0) {
+        if (clean.length === 0 && !seedingRef.current) {
+          seedingRef.current = true;
           const seeded = await Promise.all(
             DEFAULT_LISTS.map((l) =>
               supabase.from('lists').insert({ ...l, user_id: user.id }).select().single()
@@ -73,11 +87,11 @@ export default function Todos({ user }) {
           setLists(newLists);
           setSelectedId(newLists[0]?.id ?? null);
           await db.lists.bulkAdd(newLists);
-        } else {
-          setLists(data);
-          setSelectedId((prev) => prev ?? data[0]?.id ?? null);
+        } else if (clean.length > 0) {
+          setLists(clean);
+          setSelectedId((prev) => prev ?? clean[0]?.id ?? null);
           await db.lists.clear();
-          await db.lists.bulkAdd(data);
+          await db.lists.bulkAdd(clean);
         }
       }
     } else {
