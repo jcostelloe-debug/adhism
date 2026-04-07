@@ -960,6 +960,7 @@ function IncomeTab({ user, bills }) {
 
   const stable   = sources.filter(s => s.type === 'stable');
   const variable = sources.filter(s => s.type === 'variable');
+  const contributionTotal = bills.reduce((s, b) => s + Number(b.weekly_aside || 0), 0);
 
   return (
     <div style={S.financesContent}>
@@ -1048,10 +1049,9 @@ function IncomeTab({ user, bills }) {
           )}
           {sources.length > 0 && weeks.map((weekStart, i) => {
             const weekStr   = toDateStr(weekStart);
-            const weekBills = getBillsForWeek(bills, weekStart);
-            const billTotal = weekBills.reduce((s, b) => s + Number(b.amount), 0);
+            const weekBills = getBillsForWeek(bills, weekStart); // display only — not used in net calc
             const incTotal  = sources.reduce((s, src) => s + incomeForWeek(src, weekStart, entries).amount, 0);
-            const net       = incTotal - billTotal;
+            const net       = incTotal - contributionTotal;
 
             return (
               <div key={weekStr} style={{ ...S.card, marginBottom:12 }}>
@@ -1114,15 +1114,24 @@ function IncomeTab({ user, bills }) {
                   );
                 })}
 
-                {/* Bills */}
+                {/* Bill contributions — always shown if bills exist */}
+                {contributionTotal > 0 && (
+                  <div style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 0', borderBottom:'1px solid #f5f3f0' }}>
+                    <div style={{ width:7, height:7, borderRadius:'50%', backgroundColor:'#fb923c', flexShrink:0 }} />
+                    <span style={{ flex:1, fontSize:13, color:'#7a7885' }}>Bill contributions</span>
+                    <span style={{ fontSize:13, fontWeight:600, color:'#e06b6b' }}>−{AUD(contributionTotal)}</span>
+                  </div>
+                )}
+
+                {/* Bills due this week — informational only */}
                 {weekBills.length > 0 && (
                   <>
-                    <div style={{ fontSize:10, fontWeight:700, color:'#c0bccc', textTransform:'uppercase', letterSpacing:'0.5px', margin:'10px 0 5px' }}>Bills Due</div>
+                    <div style={{ fontSize:10, fontWeight:700, color:'#c0bccc', textTransform:'uppercase', letterSpacing:'0.5px', margin:'10px 0 5px' }}>Due This Week</div>
                     {weekBills.map(bill => (
-                      <div key={bill.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 0' }}>
+                      <div key={bill.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'3px 0' }}>
                         <div style={{ ...S.listDot(bill.color), width:7, height:7 }} />
-                        <span style={{ flex:1, fontSize:13, color:'#e06b6b' }}>{bill.name}</span>
-                        <span style={{ fontSize:13, fontWeight:600, color:'#e06b6b' }}>−{bill.is_approximate ? '~' : ''}{AUD(bill.amount)}</span>
+                        <span style={{ flex:1, fontSize:12, color:'#9996a8' }}>{bill.name}</span>
+                        <span style={{ fontSize:12, color:'#9996a8' }}>{bill.is_approximate ? '~' : ''}{AUD(bill.amount)} due</span>
                       </div>
                     ))}
                   </>
@@ -1130,7 +1139,7 @@ function IncomeTab({ user, bills }) {
 
                 {/* Divider + totals */}
                 <div style={{ borderTop:'1px solid #ece9e3', marginTop:10, paddingTop:8, display:'flex', justifyContent:'space-between' }}>
-                  <span style={{ fontSize:12, color:'#b0adb8' }}>Income {AUD(incTotal)} · Bills {AUD(billTotal)}</span>
+                  <span style={{ fontSize:12, color:'#b0adb8' }}>Income {AUD(incTotal)} · Contributions {AUD(contributionTotal)}</span>
                   <span style={{ fontSize:12, fontWeight:700, color: net >= 0 ? '#5cb88a' : '#e06b6b' }}>
                     Net {net < 0 ? '-' : ''}{AUD(Math.abs(net))}
                   </span>
