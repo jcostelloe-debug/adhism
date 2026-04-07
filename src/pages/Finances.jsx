@@ -310,6 +310,7 @@ function BillsTab({ user, online }) {
   const totalDue  = visibleBills.reduce((s, b) => s + Number(b.amount), 0);
   const totalPaid = visibleBills.filter(b => paidIds.has(b.id)).reduce((s, b) => s + Number(b.amount), 0);
   const needsRecurrenceMonth = ['quarterly','half-yearly','annually'].includes(form.recurrence);
+  const isFutureMonth = viewYear > today.getFullYear() || (viewYear === today.getFullYear() && viewMonth > today.getMonth());
 
   // Upcoming: next occurrence of every bill after the current view month, within 12 months
   const upcomingBills = bills
@@ -338,6 +339,13 @@ function BillsTab({ user, online }) {
           <button style={S.calendarNavBtn} onClick={nextMonth}>›</button>
         </div>
       </div>
+
+      {/* Future month notice */}
+      {isFutureMonth && (
+        <div style={{ fontSize:12, color:'#d97706', background:'#fef9ec', border:'1px solid #fde68a', borderRadius:8, padding:'8px 12px', marginBottom:12 }}>
+          Viewing a future month — bills cannot be marked as paid yet
+        </div>
+      )}
 
       {/* Bill list */}
       {visibleBills.length === 0 && (
@@ -369,7 +377,7 @@ function BillsTab({ user, online }) {
           <div style={S.billAmount(paidIds.has(bill.id))}>
             {bill.is_approximate ? '~' : ''}{AUD(bill.amount)}
           </div>
-          <div style={S.paidToggle(paidIds.has(bill.id))} onClick={() => togglePaid(bill)}>
+          <div style={{ ...S.paidToggle(paidIds.has(bill.id)), ...(isFutureMonth ? { opacity:0.3, cursor:'not-allowed' } : {}) }} onClick={() => !isFutureMonth && togglePaid(bill)}>
             {paidIds.has(bill.id) && <span style={{ color:'#fff', fontSize:12, fontWeight:700 }}>✓</span>}
           </div>
           <span data-del style={{ ...S.todoDelete, opacity:0 }} onClick={() => deleteBill(bill.id)}>×</span>
@@ -1226,6 +1234,272 @@ function IncomeTab({ user, bills }) {
   );
 }
 
+// ─── Credit Card Tab ──────────────────────────────────────────────────────────
+
+const CC_MONTH = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; };
+
+function CreditCardTab({ user }) {
+  const [cards, setCards]               = useState([]);
+  const [selectedCardId, setSelectedCardId] = useState(null);
+  const [plans, setPlans]               = useState([]);
+  const [monthlyEntry, setMonthlyEntry] = useState(null);
+  const [addingCard, setAddingCard]     = useState(false);
+  const [addingPlan, setAddingPlan]     = useState(false);
+  const [closingMonth, setClosingMonth] = useState(false);
+  const [editingMonthly, setEditingMonthly] = useState(false);
+  const [monthlyInput, setMonthlyInput] = useState('');
+  const [cardForm, setCardForm]         = useState({ name:'', credit_limit:'', current_balance:'' });
+  const [planForm, setPlanForm]         = useState({ name:'', monthly_amount:'', payments_left:'' });
+  const thisMonth = CC_MONTH();
+
+  useEffect(() => {
+    supabase.from('credit_cards').select('*').eq('user_id', user.id).order('created_at')
+      .then(({ data }) => { if (data?.length) { setCards(data); setSelectedCardId(data[0].id); } });
+  }, [user.id]);
+
+  useEffect(() => {
+    if (!selectedCardId) return;
+    supabase.from('credit_card_plans').select('*').eq('card_id', selectedCardId).order('created_at')
+      .then(({ data }) => { if (data) setPlans(data); });
+    supabase.from('credit_card_monthly').select('*').eq('card_id', selectedCardId).eq('month', thisMonth).maybeSingle()
+      .then(({ data }) => { setMonthlyEntry(data || null); setMonthlyInput(data ? String(data.amount) : ''); });
+  }, [selectedCardId, thisMonth]);
+
+  const selectedCard   = cards.find(c => c.id === selectedCardId);
+  const activePlans    = plans.filter(p => p.payments_left > 0);
+  const planTotal      = activePlans.reduce((s, p) => s + Number(p.monthly_amount), 0);
+  const monthlyAmount  = monthlyEntry ? Number(monthlyEntry.amount) : 0;
+  const owing          = Number(selectedCard?.current_balance || 0);
+  const available      = Math.max(0, Number(selectedCard?.credit_limit || 0) - owing);
+
+  async function addCard() {
+    if (!cardForm.name.trim() || !cardForm.credit_limit) return;
+    const row = { user_id: user.id, name: cardForm.name.trim(), credit_limit: parseFloat(cardForm.credit_limit), current_balance: parseFloat(cardForm.current_balance) || 0 };
+    const { data } = await supabase.from('credit_cards').insert(row).select().single();
+    if (data) { setCards(prev => [...prev, data]); setSelectedCardId(data.id); setAddingCard(false); setCardForm({ name:'', credit_limit:'', current_balance:'' }); }
+  }
+
+  async function saveMonthlySpend() {
+    const amount = parseFloat(monthlyInput);
+    if (!selectedCard || isNaN(amount)) return;
+    const row = { user_id: user.id, card_id: selectedCardId, month: thisMonth, amount };
+    const { data: entry } = await supabase.from('credit_card_monthly')
+      .upsert(row, { onConflict: 'card_id,month' }).select().single();
+    if (entry) setMonthlyEntry(entry);
+
+    // Create or update linked bill
+    const billBase = { user_id: user.id, name: `${selectedCard.name} – Monthly`, recurrence: 'monthly', category: 'Credit Card', color: '#a78bfa', due_day: 1 };
+    if (selectedCard.monthly_bill_id) {
+      const wa = calcWeeklyAside({ ...billBase, amount });
+      await supabase.from('bills').update({ amount, weekly_aside: wa }).eq('id', selectedCard.monthly_bill_id);
+    } else {
+      const billRow = { ...billBase, amount };
+      billRow.weekly_aside = calcWeeklyAside(billRow);
+      const { data: bill } = await supabase.from('bills').insert(billRow).select().single();
+      if (bill) {
+        await supabase.from('credit_cards').update({ monthly_bill_id: bill.id }).eq('id', selectedCardId);
+        setCards(prev => prev.map(c => c.id === selectedCardId ? { ...c, monthly_bill_id: bill.id } : c));
+      }
+    }
+    setEditingMonthly(false);
+  }
+
+  async function addPlan() {
+    if (!planForm.name.trim() || !planForm.monthly_amount || !planForm.payments_left) return;
+    const row = { user_id: user.id, card_id: selectedCardId, name: planForm.name.trim(), monthly_amount: parseFloat(planForm.monthly_amount), payments_left: parseInt(planForm.payments_left) };
+    const { data } = await supabase.from('credit_card_plans').insert(row).select().single();
+    if (data) { setPlans(prev => [...prev, data]); setAddingPlan(false); setPlanForm({ name:'', monthly_amount:'', payments_left:'' }); }
+  }
+
+  async function deletePlan(id) {
+    setPlans(prev => prev.filter(p => p.id !== id));
+    await supabase.from('credit_card_plans').delete().eq('id', id);
+  }
+
+  async function confirmCloseMonth() {
+    if (!selectedCard) return;
+    setClosingMonth(false);
+    // Reduce payments_left on each active plan by 1
+    const updatedPlans = await Promise.all(activePlans.map(async plan => {
+      const newLeft = plan.payments_left - 1;
+      await supabase.from('credit_card_plans').update({ payments_left: newLeft }).eq('id', plan.id);
+      return { ...plan, payments_left: newLeft };
+    }));
+    setPlans(prev => prev.map(p => updatedPlans.find(u => u.id === p.id) || p));
+    // Reduce balance by plan payments + this month's spend
+    const totalPaid = planTotal + monthlyAmount;
+    const newBalance = Math.max(0, owing - totalPaid);
+    await supabase.from('credit_cards').update({ current_balance: newBalance }).eq('id', selectedCardId);
+    setCards(prev => prev.map(c => c.id === selectedCardId ? { ...c, current_balance: newBalance } : c));
+    if (monthlyEntry) await supabase.from('credit_card_monthly').update({ closed: true }).eq('id', monthlyEntry.id);
+  }
+
+  const monthClosed = monthlyEntry?.closed;
+
+  return (
+    <div style={S.financesContent}>
+      {/* Card selector */}
+      {cards.length > 1 && (
+        <div style={{ display:'flex', gap:8, marginBottom:16, flexWrap:'wrap' }}>
+          {cards.map(c => (
+            <button key={c.id} style={{ ...S.financesTab(c.id === selectedCardId), padding:'6px 14px' }} onClick={() => setSelectedCardId(c.id)}>{c.name}</button>
+          ))}
+        </div>
+      )}
+
+      {/* No cards yet */}
+      {cards.length === 0 && !addingCard && (
+        <div style={{ ...S.emptyState, paddingTop:60 }}>
+          <div style={{ marginBottom:12 }}>No credit cards added yet</div>
+          <button style={S.btnPrimary} onClick={() => setAddingCard(true)}>Add Credit Card</button>
+        </div>
+      )}
+
+      {/* Add card form */}
+      {addingCard && (
+        <div style={S.addFormBox}>
+          <div style={{ fontSize:12, fontWeight:700, color:'#9996a8', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:12 }}>New Credit Card</div>
+          <div style={S.twoCol}>
+            <div><label style={S.fieldLabel}>Card Name</label><input style={S.input} placeholder="e.g. Visa" value={cardForm.name} onChange={e => setCardForm(f => ({...f, name:e.target.value}))} /></div>
+            <div><label style={S.fieldLabel}>Credit Limit</label><input style={S.input} type="number" placeholder="e.g. 5000" value={cardForm.credit_limit} onChange={e => setCardForm(f => ({...f, credit_limit:e.target.value}))} /></div>
+          </div>
+          <div><label style={S.fieldLabel}>Current Balance Owing</label><input style={{ ...S.input, maxWidth:200 }} type="number" placeholder="e.g. 1200" value={cardForm.current_balance} onChange={e => setCardForm(f => ({...f, current_balance:e.target.value}))} /></div>
+          <div style={{ display:'flex', gap:8, marginTop:8 }}>
+            <button style={S.btnPrimary} onClick={addCard}>Save</button>
+            <button style={S.btnGhost} onClick={() => setAddingCard(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {selectedCard && (
+        <>
+          {/* Summary stats */}
+          <div style={S.financesSummaryRow}>
+            <div style={S.statCard}><div style={S.statLabel}>Total Owing</div><div style={{ ...S.statValue, color:'#e06b6b' }}>{AUD(owing)}</div></div>
+            <div style={S.statCard}><div style={S.statLabel}>Available</div><div style={{ ...S.statValue, color:'#5cb88a' }}>{AUD(available)}</div></div>
+            <div style={S.statCard}><div style={S.statLabel}>Credit Limit</div><div style={S.statValue}>{AUD(selectedCard.credit_limit)}</div></div>
+          </div>
+
+          {/* Progress bar */}
+          <div style={{ marginBottom:20 }}>
+            <div style={{ background:'#ece9e3', borderRadius:6, height:8, overflow:'hidden' }}>
+              <div style={{ width:`${Math.min(100,(owing/Number(selectedCard.credit_limit))*100)}%`, background:'linear-gradient(90deg,#a78bfa,#e06b6b)', height:'100%', borderRadius:6, transition:'width 0.3s' }} />
+            </div>
+            <div style={{ fontSize:11, color:'#b0adb8', marginTop:4 }}>{((owing/Number(selectedCard.credit_limit))*100).toFixed(0)}% utilised</div>
+          </div>
+
+          {/* This month's spend */}
+          <div style={{ ...S.card, marginBottom:16 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+              <div style={S.cardTitle}>This Month's Spend</div>
+              {!editingMonthly && !monthClosed && (
+                <button style={{ ...S.btnGhost, fontSize:12, padding:'4px 10px' }} onClick={() => setEditingMonthly(true)}>
+                  {monthlyEntry ? 'Edit' : 'Enter amount'}
+                </button>
+              )}
+            </div>
+            {editingMonthly ? (
+              <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                <input style={{ ...S.input, width:160 }} type="number" placeholder="0.00" value={monthlyInput} onChange={e => setMonthlyInput(e.target.value)} onKeyDown={e => { if (e.key==='Enter') saveMonthlySpend(); if (e.key==='Escape') setEditingMonthly(false); }} autoFocus />
+                <button style={S.btnPrimary} onClick={saveMonthlySpend}>Save</button>
+                <button style={S.btnGhost} onClick={() => setEditingMonthly(false)}>Cancel</button>
+              </div>
+            ) : (
+              <div style={{ display:'flex', alignItems:'baseline', gap:8 }}>
+                <span style={{ fontSize:24, fontWeight:800, color:'#2d2b38' }}>{monthlyAmount > 0 ? AUD(monthlyAmount) : <span style={{ fontSize:15, color:'#b0adb8' }}>Not set</span>}</span>
+                {monthlyAmount > 0 && <span style={{ fontSize:12, color:'#b0adb8' }}>added to bills automatically</span>}
+                {monthClosed && <span style={{ fontSize:11, color:'#5cb88a', background:'#edfdf6', padding:'2px 8px', borderRadius:20 }}>Month closed</span>}
+              </div>
+            )}
+          </div>
+
+          {/* Pay It Plans */}
+          <div style={{ ...S.card, marginBottom:16 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
+              <div style={S.cardTitle}>Pay It Plans</div>
+              <button style={{ ...S.btnGhost, fontSize:12, padding:'4px 10px' }} onClick={() => setAddingPlan(true)}>+ Add Plan</button>
+            </div>
+
+            {plans.length === 0 && <div style={{ fontSize:13, color:'#b0adb8', marginBottom:8 }}>No plans yet</div>}
+
+            {plans.map(plan => {
+              const done = plan.payments_left === 0;
+              return (
+                <div key={plan.id} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 0', borderBottom:'1px solid #f5f3f0', opacity: done ? 0.5 : 1 }}
+                  onMouseEnter={e => { const d = e.currentTarget.querySelector('[data-del]'); if (d) d.style.opacity='1'; }}
+                  onMouseLeave={e => { const d = e.currentTarget.querySelector('[data-del]'); if (d) d.style.opacity='0'; }}
+                >
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:13, fontWeight:600, color: done ? '#b0adb8' : '#2d2b38' }}>{plan.name}</div>
+                    <div style={{ fontSize:12, color:'#9996a8', marginTop:2 }}>
+                      {AUD(plan.monthly_amount)}/month
+                    </div>
+                  </div>
+                  <div style={{ textAlign:'right' }}>
+                    {done
+                      ? <span style={{ fontSize:12, color:'#5cb88a', fontWeight:600 }}>Paid off</span>
+                      : <><div style={{ fontSize:14, fontWeight:700, color:'#6d5fc7' }}>{plan.payments_left}</div>
+                          <div style={{ fontSize:11, color:'#b0adb8' }}>payment{plan.payments_left !== 1 ? 's' : ''} left</div></>
+                    }
+                  </div>
+                  <span data-del style={{ ...S.todoDelete, opacity:0, marginLeft:4 }} onClick={() => deletePlan(plan.id)}>×</span>
+                </div>
+              );
+            })}
+
+            {activePlans.length > 0 && (
+              <div style={{ display:'flex', justifyContent:'space-between', paddingTop:10, marginTop:4 }}>
+                <span style={{ fontSize:12, color:'#b0adb8' }}>Total monthly plan payments</span>
+                <span style={{ fontSize:13, fontWeight:700, color:'#6d5fc7' }}>{AUD(planTotal)}/mo</span>
+              </div>
+            )}
+
+            {addingPlan && (
+              <div style={{ marginTop:12, paddingTop:12, borderTop:'1px solid #ece9e3' }}>
+                <div style={S.twoCol}>
+                  <div><label style={S.fieldLabel}>Plan Name</label><input style={S.input} placeholder="e.g. Laptop" value={planForm.name} onChange={e => setPlanForm(f => ({...f, name:e.target.value}))} /></div>
+                  <div><label style={S.fieldLabel}>Monthly Amount</label><input style={S.input} type="number" placeholder="0.00" value={planForm.monthly_amount} onChange={e => setPlanForm(f => ({...f, monthly_amount:e.target.value}))} /></div>
+                </div>
+                <div><label style={S.fieldLabel}>Number of Payments</label><input style={{ ...S.input, maxWidth:140 }} type="number" placeholder="e.g. 12" value={planForm.payments_left} onChange={e => setPlanForm(f => ({...f, payments_left:e.target.value}))} /></div>
+                <div style={{ display:'flex', gap:8, marginTop:8 }}>
+                  <button style={S.btnPrimary} onClick={addPlan}>Save</button>
+                  <button style={S.btnGhost} onClick={() => setAddingPlan(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Close Month */}
+          {!monthClosed && (
+            <div style={{ ...S.card, borderColor:'#f0edf8' }}>
+              <div style={S.cardTitle}>Close This Month</div>
+              <div style={{ fontSize:13, color:'#7a7885', margin:'8px 0 12px' }}>
+                Marks all plans as paid for this month and updates your balance.
+                <div style={{ marginTop:6, fontSize:12, color:'#9996a8' }}>
+                  Paying: <strong>{AUD(planTotal)}</strong> plans + <strong>{AUD(monthlyAmount)}</strong> spend = <strong>{AUD(planTotal + monthlyAmount)}</strong> total
+                  → new balance <strong style={{ color:'#5cb88a' }}>{AUD(Math.max(0, owing - planTotal - monthlyAmount))}</strong>
+                </div>
+              </div>
+              {closingMonth ? (
+                <div style={{ display:'flex', gap:8 }}>
+                  <button style={S.btnPrimary} onClick={confirmCloseMonth}>Confirm</button>
+                  <button style={S.btnGhost} onClick={() => setClosingMonth(false)}>Cancel</button>
+                </div>
+              ) : (
+                <button style={S.btnGhost} onClick={() => setClosingMonth(true)}>Close Month</button>
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      {cards.length > 0 && !addingCard && (
+        <button style={{ ...S.btnGhost, marginTop:12, fontSize:12 }} onClick={() => setAddingCard(true)}>+ Add Another Card</button>
+      )}
+    </div>
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function Finances({ user }) {
@@ -1245,17 +1519,18 @@ export default function Finances({ user }) {
   return (
     <div style={S.financesPage}>
       <div style={S.financesTabBar}>
-        {['bills','income','savings','statements'].map(t => (
+        {['bills','credit cards','income','savings','statements'].map(t => (
           <button key={t} style={S.financesTab(tab === t)} onClick={() => setTab(t)}>
             {t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
 
-      {tab === 'bills'      && <BillsTab      user={user} online={navigator.onLine} bills={bills} />}
-      {tab === 'income'     && <IncomeTab     user={user} bills={bills} />}
-      {tab === 'savings'    && <SavingsTab    user={user} bills={bills} avgWeeklyIncome={avgWeeklyIncome} />}
-      {tab === 'statements' && <StatementsTab user={user} transactions={transactions} setTransactions={setTransactions} />}
+      {tab === 'bills'         && <BillsTab      user={user} online={navigator.onLine} bills={bills} />}
+      {tab === 'credit cards'  && <CreditCardTab user={user} />}
+      {tab === 'income'        && <IncomeTab     user={user} bills={bills} />}
+      {tab === 'savings'       && <SavingsTab    user={user} bills={bills} avgWeeklyIncome={avgWeeklyIncome} />}
+      {tab === 'statements'    && <StatementsTab user={user} transactions={transactions} setTransactions={setTransactions} />}
     </div>
   );
 }
