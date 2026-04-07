@@ -1244,6 +1244,8 @@ function CreditCardTab({ user }) {
   const [plans, setPlans]               = useState([]);
   const [monthlyEntry, setMonthlyEntry] = useState(null);
   const [addingCard, setAddingCard]     = useState(false);
+  const [editingCard, setEditingCard]   = useState(false);
+  const [editCardForm, setEditCardForm] = useState({ name:'', credit_limit:'', current_balance:'' });
   const [addingPlan, setAddingPlan]     = useState(false);
   const [closingMonth, setClosingMonth] = useState(false);
   const [editingMonthly, setEditingMonthly] = useState(false);
@@ -1277,6 +1279,20 @@ function CreditCardTab({ user }) {
     const row = { user_id: user.id, name: cardForm.name.trim(), credit_limit: parseFloat(cardForm.credit_limit), current_balance: parseFloat(cardForm.current_balance) || 0 };
     const { data } = await supabase.from('credit_cards').insert(row).select().single();
     if (data) { setCards(prev => [...prev, data]); setSelectedCardId(data.id); setAddingCard(false); setCardForm({ name:'', credit_limit:'', current_balance:'' }); }
+  }
+
+  async function updateCard() {
+    if (!editCardForm.name.trim() || !editCardForm.credit_limit) return;
+    const changes = { name: editCardForm.name.trim(), credit_limit: parseFloat(editCardForm.credit_limit), current_balance: parseFloat(editCardForm.current_balance) || 0 };
+    const { data } = await supabase.from('credit_cards').update(changes).eq('id', selectedCardId).select().single();
+    if (data) {
+      setCards(prev => prev.map(c => c.id === selectedCardId ? data : c));
+      // If name changed, update linked bill name too
+      if (data.monthly_bill_id && changes.name !== selectedCard.name) {
+        await supabase.from('bills').update({ name: `${changes.name} – Monthly` }).eq('id', data.monthly_bill_id);
+      }
+      setEditingCard(false);
+    }
   }
 
   // Sync the linked bill to reflect total monthly obligation (plans + spend)
@@ -1386,11 +1402,28 @@ function CreditCardTab({ user }) {
 
       {selectedCard && (
         <>
+          {/* Edit card form */}
+          {editingCard ? (
+            <div style={{ ...S.addFormBox, marginBottom:16 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#9996a8', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:12 }}>Edit Card</div>
+              <div style={S.twoCol}>
+                <div><label style={S.fieldLabel}>Card Name</label><input style={S.input} value={editCardForm.name} onChange={e => setEditCardForm(f => ({...f, name:e.target.value}))} /></div>
+                <div><label style={S.fieldLabel}>Credit Limit</label><input style={S.input} type="number" value={editCardForm.credit_limit} onChange={e => setEditCardForm(f => ({...f, credit_limit:e.target.value}))} /></div>
+              </div>
+              <div><label style={S.fieldLabel}>Current Balance Owing</label><input style={{ ...S.input, maxWidth:200 }} type="number" value={editCardForm.current_balance} onChange={e => setEditCardForm(f => ({...f, current_balance:e.target.value}))} /></div>
+              <div style={{ display:'flex', gap:8, marginTop:8 }}>
+                <button style={S.btnPrimary} onClick={updateCard}>Save</button>
+                <button style={S.btnGhost} onClick={() => setEditingCard(false)}>Cancel</button>
+              </div>
+            </div>
+          ) : null}
+
           {/* Summary stats */}
-          <div style={S.financesSummaryRow}>
+          <div style={{ ...S.financesSummaryRow, alignItems:'flex-start' }}>
             <div style={S.statCard}><div style={S.statLabel}>Total Owing</div><div style={{ ...S.statValue, color:'#e06b6b' }}>{AUD(owing)}</div></div>
             <div style={S.statCard}><div style={S.statLabel}>Available</div><div style={{ ...S.statValue, color:'#5cb88a' }}>{AUD(available)}</div></div>
             <div style={S.statCard}><div style={S.statLabel}>Credit Limit</div><div style={S.statValue}>{AUD(selectedCard.credit_limit)}</div></div>
+            <button style={{ ...S.btnGhost, fontSize:12, padding:'6px 12px', alignSelf:'center' }} onClick={() => { setEditCardForm({ name: selectedCard.name, credit_limit: String(selectedCard.credit_limit), current_balance: String(selectedCard.current_balance) }); setEditingCard(true); }}>Edit card</button>
           </div>
 
           {/* Progress bar */}
