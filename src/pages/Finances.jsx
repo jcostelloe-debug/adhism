@@ -133,7 +133,58 @@ function analyseTransactions(transactions) {
   return { monthlyByCategory, avgWeeklyIncome, tips };
 }
 
+// ─── Bills helpers ────────────────────────────────────────────────────────────
+
+const RECURRENCE = [
+  { value: 'monthly',     label: 'Monthly' },
+  { value: 'quarterly',   label: 'Quarterly' },
+  { value: 'half-yearly', label: 'Half-yearly' },
+  { value: 'annually',    label: 'Annually' },
+  { value: 'one-off',     label: 'One-off' },
+];
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Does this bill fall due in the given month/year?
+function billDueThisMonth(bill, year, month) {
+  const m = month + 1; // 1-indexed
+  switch (bill.recurrence || 'monthly') {
+    case 'monthly':    return true;
+    case 'quarterly':  return bill.due_month ? (((m - bill.due_month) % 3 + 3) % 3 === 0) : true;
+    case 'half-yearly':return bill.due_month ? (((m - bill.due_month) % 6 + 6) % 6 === 0) : true;
+    case 'annually':   return bill.due_month ? m === bill.due_month : true;
+    case 'one-off': {
+      if (!bill.due_date) return false;
+      const d = new Date(bill.due_date);
+      return d.getFullYear() === year && d.getMonth() === month;
+    }
+    default: return true;
+  }
+}
+
+function recurrenceLabel(bill) {
+  const r = bill.recurrence || 'monthly';
+  if (r === 'monthly') return 'Monthly';
+  if (r === 'one-off') {
+    if (!bill.due_date) return 'One-off';
+    return `One-off · ${new Date(bill.due_date).toLocaleDateString('en-AU', { day:'numeric', month:'short', year:'numeric' })}`;
+  }
+  if (!bill.due_month) return r.charAt(0).toUpperCase() + r.slice(1);
+  const m = bill.due_month - 1;
+  if (r === 'annually')    return `Annually · ${MONTHS_SHORT[m]}`;
+  if (r === 'quarterly')   return `Quarterly · ${[m,(m+3)%12,(m+6)%12,(m+9)%12].map(i=>MONTHS_SHORT[i]).join(', ')}`;
+  if (r === 'half-yearly') return `Half-yearly · ${[m,(m+6)%12].map(i=>MONTHS_SHORT[i]).join(', ')}`;
+  return r;
+}
+
+function ordinal(n) {
+  const s = ['th','st','nd','rd'];
+  const v = n % 100;
+  return n + (s[(v-20)%10] || s[v] || s[0]);
+}
+
 // ─── Bills Tab ────────────────────────────────────────────────────────────────
+
+const EMPTY_FORM = { name:'', amount:'', is_approximate:false, recurrence:'monthly', due_day:'', due_month:'', due_date:'', category:'Other', color: BILL_COLORS[0] };
 
 function BillsTab({ user, online }) {
   const today = new Date();
@@ -142,7 +193,7 @@ function BillsTab({ user, online }) {
   const [bills, setBills]         = useState([]);
   const [paidIds, setPaidIds]     = useState(new Set());
   const [adding, setAdding]       = useState(false);
-  const [form, setForm] = useState({ name:'', amount:'', due_day:'', category:'Other', color: BILL_COLORS[0] });
+  const [form, setForm]           = useState(EMPTY_FORM);
 
   const monthStr = toMonthStr(viewYear, viewMonth);
 
@@ -167,9 +218,20 @@ function BillsTab({ user, online }) {
 
   async function addBill() {
     if (!form.name.trim() || !form.amount) return;
-    const row = { user_id: user.id, name: form.name.trim(), amount: parseFloat(form.amount), due_day: parseInt(form.due_day) || null, category: form.category, color: form.color };
+    const row = {
+      user_id: user.id,
+      name: form.name.trim(),
+      amount: parseFloat(form.amount),
+      is_approximate: form.is_approximate,
+      recurrence: form.recurrence,
+      due_day: parseInt(form.due_day) || null,
+      due_month: ['quarterly','half-yearly','annually'].includes(form.recurrence) ? (parseInt(form.due_month) || null) : null,
+      due_date: form.recurrence === 'one-off' ? (form.due_date || null) : null,
+      category: form.category,
+      color: form.color,
+    };
     const { data } = await supabase.from('bills').insert(row).select().single();
-    if (data) { setBills(prev => [...prev, data]); setAdding(false); setForm({ name:'', amount:'', due_day:'', category:'Other', color: BILL_COLORS[0] }); }
+    if (data) { setBills(prev => [...prev, data]); setAdding(false); setForm(EMPTY_FORM); }
   }
 
   async function deleteBill(id) {
@@ -180,21 +242,25 @@ function BillsTab({ user, online }) {
   function prevMonth() { if (viewMonth === 0) { setViewMonth(11); setViewYear(y => y-1); } else setViewMonth(m => m-1); }
   function nextMonth() { if (viewMonth === 11) { setViewMonth(0); setViewYear(y => y+1); } else setViewMonth(m => m+1); }
 
-  const totalMonthly = bills.reduce((s, b) => s + Number(b.amount), 0);
-  const totalPaid    = bills.filter(b => paidIds.has(b.id)).reduce((s, b) => s + Number(b.amount), 0);
+  const visibleBills = bills.filter(b => billDueThisMonth(b, viewYear, viewMonth))
+    .sort((a,b) => (a.due_day||99) - (b.due_day||99));
+
+  const totalDue  = visibleBills.reduce((s, b) => s + Number(b.amount), 0);
+  const totalPaid = visibleBills.filter(b => paidIds.has(b.id)).reduce((s, b) => s + Number(b.amount), 0);
+  const needsRecurrenceMonth = ['quarterly','half-yearly','annually'].includes(form.recurrence);
 
   return (
     <div style={S.financesContent}>
       {/* Summary */}
       <div style={S.financesSummaryRow}>
-        <div style={S.statCard}><div style={S.statLabel}>Monthly Total</div><div style={S.statValue}>{AUD(totalMonthly)}</div></div>
-        <div style={S.statCard}><div style={S.statLabel}>Paid</div><div style={{ ...S.statValue, color: '#4ade80' }}>{AUD(totalPaid)}</div></div>
-        <div style={S.statCard}><div style={S.statLabel}>Remaining</div><div style={{ ...S.statValue, color: '#fb923c' }}>{AUD(totalMonthly - totalPaid)}</div></div>
+        <div style={S.statCard}><div style={S.statLabel}>Due This Month</div><div style={S.statValue}>{visibleBills.some(b=>b.is_approximate) ? '~' : ''}{AUD(totalDue)}</div></div>
+        <div style={S.statCard}><div style={S.statLabel}>Paid</div><div style={{ ...S.statValue, color: '#5cb88a' }}>{AUD(totalPaid)}</div></div>
+        <div style={S.statCard}><div style={S.statLabel}>Remaining</div><div style={{ ...S.statValue, color: '#fb923c' }}>{AUD(totalDue - totalPaid)}</div></div>
       </div>
 
       {/* Month nav */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: '#f0f0f5' }}>{MONTH_NAMES[viewMonth]} {viewYear}</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: '#2d2b38' }}>{MONTH_NAMES[viewMonth]} {viewYear}</div>
         <div style={{ display:'flex', gap: 8 }}>
           <button style={S.calendarNavBtn} onClick={prevMonth}>‹</button>
           <button style={S.calendarNavBtn} onClick={nextMonth}>›</button>
@@ -202,8 +268,12 @@ function BillsTab({ user, online }) {
       </div>
 
       {/* Bill list */}
-      {bills.length === 0 && <div style={S.emptyState}>No bills yet — add one below</div>}
-      {bills.sort((a,b) => (a.due_day||99) - (b.due_day||99)).map(bill => (
+      {visibleBills.length === 0 && (
+        <div style={S.emptyState}>
+          {bills.length === 0 ? 'No bills yet — add one below' : 'No bills due in this month'}
+        </div>
+      )}
+      {visibleBills.map(bill => (
         <div
           key={bill.id}
           style={S.billRow(paidIds.has(bill.id))}
@@ -213,11 +283,17 @@ function BillsTab({ user, online }) {
           <div style={{ ...S.listDot(bill.color), width:10, height:10 }} />
           <div style={{ flex:1 }}>
             <div style={S.billName}>{bill.name}</div>
-            <div style={S.billMeta}>{bill.category}{bill.due_day ? ` · due ${bill.due_day}${['th','st','nd','rd'][bill.due_day <= 3 ? bill.due_day : 0]}` : ''}</div>
+            <div style={S.billMeta}>
+              {bill.category} · {recurrenceLabel(bill)}
+              {bill.due_day ? ` · due ${ordinal(bill.due_day)}` : ''}
+              {bill.is_approximate && <span style={{ color:'#d97706', marginLeft:6 }}>approx.</span>}
+            </div>
           </div>
-          <div style={S.billAmount(paidIds.has(bill.id))}>{AUD(bill.amount)}</div>
+          <div style={S.billAmount(paidIds.has(bill.id))}>
+            {bill.is_approximate ? '~' : ''}{AUD(bill.amount)}
+          </div>
           <div style={S.paidToggle(paidIds.has(bill.id))} onClick={() => togglePaid(bill)}>
-            {paidIds.has(bill.id) && <span style={{ color:'#0f0f13', fontSize:12, fontWeight:700 }}>✓</span>}
+            {paidIds.has(bill.id) && <span style={{ color:'#fff', fontSize:12, fontWeight:700 }}>✓</span>}
           </div>
           <span data-del style={{ ...S.todoDelete, opacity:0 }} onClick={() => deleteBill(bill.id)}>×</span>
         </div>
@@ -228,21 +304,25 @@ function BillsTab({ user, online }) {
         ? <button style={{ ...S.btnGhost, marginTop: 8 }} onClick={() => setAdding(true)}>+ Add Bill</button>
         : (
           <div style={S.addFormBox}>
-            <div style={{ fontSize:12, fontWeight:700, color:'#666677', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:12 }}>New Recurring Bill</div>
+            <div style={{ fontSize:12, fontWeight:700, color:'#9996a8', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:12 }}>New Bill</div>
+
             <div style={S.twoCol}>
               <div>
                 <label style={S.fieldLabel}>Name</label>
-                <input style={S.input} placeholder="e.g. Rent" value={form.name} onChange={e => setForm(f => ({...f, name:e.target.value}))} />
+                <input style={S.input} placeholder="e.g. Body Corporate" value={form.name} onChange={e => setForm(f => ({...f, name:e.target.value}))} />
               </div>
+              <div>
+                <label style={S.fieldLabel}>Recurrence</label>
+                <select style={{ ...S.input, cursor:'pointer' }} value={form.recurrence} onChange={e => setForm(f => ({...f, recurrence:e.target.value}))}>
+                  {RECURRENCE.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div style={S.twoCol}>
               <div>
                 <label style={S.fieldLabel}>Amount (AUD)</label>
                 <input style={S.input} type="number" placeholder="0.00" value={form.amount} onChange={e => setForm(f => ({...f, amount:e.target.value}))} />
-              </div>
-            </div>
-            <div style={S.twoCol}>
-              <div>
-                <label style={S.fieldLabel}>Due Day of Month</label>
-                <input style={S.input} type="number" min="1" max="31" placeholder="e.g. 15" value={form.due_day} onChange={e => setForm(f => ({...f, due_day:e.target.value}))} />
               </div>
               <div>
                 <label style={S.fieldLabel}>Category</label>
@@ -251,15 +331,55 @@ function BillsTab({ user, online }) {
                 </select>
               </div>
             </div>
+
+            {/* Conditional date fields */}
+            <div style={S.twoCol}>
+              {form.recurrence !== 'one-off' && (
+                <div>
+                  <label style={S.fieldLabel}>Due Day of Month</label>
+                  <input style={S.input} type="number" min="1" max="31" placeholder="e.g. 15" value={form.due_day} onChange={e => setForm(f => ({...f, due_day:e.target.value}))} />
+                </div>
+              )}
+              {needsRecurrenceMonth && (
+                <div>
+                  <label style={S.fieldLabel}>Starting Month</label>
+                  <select style={{ ...S.input, cursor:'pointer' }} value={form.due_month} onChange={e => setForm(f => ({...f, due_month:e.target.value}))}>
+                    <option value="">Select month…</option>
+                    {MONTHS_SHORT.map((m,i) => <option key={i} value={i+1}>{m}</option>)}
+                  </select>
+                </div>
+              )}
+              {form.recurrence === 'one-off' && (
+                <div>
+                  <label style={S.fieldLabel}>Due Date</label>
+                  <input type="date" style={{ ...S.dateInput, width:'100%' }} value={form.due_date} onChange={e => setForm(f => ({...f, due_date:e.target.value}))} />
+                </div>
+              )}
+            </div>
+
+            {/* Approximate toggle */}
+            <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
+              <div
+                onClick={() => setForm(f => ({...f, is_approximate:!f.is_approximate}))}
+                style={{ width:20, height:20, borderRadius:5, border: form.is_approximate ? 'none' : '2px solid #d4d0ca', backgroundColor: form.is_approximate ? '#7c6fcd' : 'transparent', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0 }}
+              >
+                {form.is_approximate && <span style={{ color:'#fff', fontSize:12, fontWeight:700 }}>✓</span>}
+              </div>
+              <label style={{ fontSize:13, color:'#7a7885', cursor:'pointer' }} onClick={() => setForm(f => ({...f, is_approximate:!f.is_approximate}))}>
+                Approximate amount <span style={{ color:'#b0adb8' }}>(shows ~ prefix)</span>
+              </label>
+            </div>
+
             <label style={S.fieldLabel}>Colour</label>
-            <div style={{ display:'flex', gap:8, marginBottom:14 }}>
+            <div style={{ display:'flex', gap:8, marginBottom:16 }}>
               {BILL_COLORS.map(c => (
-                <div key={c} onClick={() => setForm(f => ({...f, color:c}))} style={{ width:18, height:18, borderRadius:'50%', backgroundColor:c, cursor:'pointer', border: form.color===c ? '2px solid #fff' : '2px solid transparent' }} />
+                <div key={c} onClick={() => setForm(f => ({...f, color:c}))} style={{ width:18, height:18, borderRadius:'50%', backgroundColor:c, cursor:'pointer', border: form.color===c ? '2px solid #6d5fc7' : '2px solid transparent' }} />
               ))}
             </div>
+
             <div style={{ display:'flex', gap:8 }}>
               <button style={S.btnPrimary} onClick={addBill}>Save Bill</button>
-              <button style={S.btnGhost} onClick={() => setAdding(false)}>Cancel</button>
+              <button style={S.btnGhost} onClick={() => { setAdding(false); setForm(EMPTY_FORM); }}>Cancel</button>
             </div>
           </div>
         )}
