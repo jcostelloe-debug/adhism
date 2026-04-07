@@ -490,11 +490,26 @@ function BillsTab({ user, online }) {
 
 // ─── Savings Tab ──────────────────────────────────────────────────────────────
 
+function weeklyEquivalent(source) {
+  const amt = Number(source.amount);
+  if (source.type === 'variable') return amt;
+  switch (source.frequency) {
+    case 'weekly':      return amt;
+    case 'fortnightly': return amt / 2;
+    case 'monthly':     return amt * 12 / 52;
+    default:            return amt;
+  }
+}
+
 function SavingsTab({ user, bills, avgWeeklyIncome }) {
   const [goals, setGoals]           = useState([]);
+  const [sources, setSources]       = useState([]);
   const [weeklyTarget, setWeeklyTarget] = useState(() => parseFloat(localStorage.getItem('adhism_weekly_target') || '0'));
   const [editingWeekly, setEditingWeekly] = useState(false);
   const [weeklyInput, setWeeklyInput]     = useState('');
+  const [bankBalance, setBankBalance] = useState(() => localStorage.getItem('adhism_bank_balance') || '');
+  const [editingBalance, setEditingBalance] = useState(false);
+  const [balanceInput, setBalanceInput] = useState('');
   const [adding, setAdding]   = useState(false);
   const [addingFunds, setAddingFunds] = useState(null);
   const [fundsInput, setFundsInput]   = useState('');
@@ -503,7 +518,16 @@ function SavingsTab({ user, bills, avgWeeklyIncome }) {
   useEffect(() => {
     supabase.from('savings_goals').select('*').eq('user_id', user.id).order('created_at')
       .then(({ data }) => { if (data) setGoals(data); });
+    supabase.from('income_sources').select('*').eq('user_id', user.id)
+      .then(({ data }) => { if (data) setSources(data); });
   }, [user.id]);
+
+  function saveBalance() {
+    const v = balanceInput.trim();
+    setBankBalance(v);
+    localStorage.setItem('adhism_bank_balance', v);
+    setEditingBalance(false);
+  }
 
   async function addGoal() {
     if (!form.name.trim() || !form.target) return;
@@ -533,13 +557,62 @@ function SavingsTab({ user, bills, avgWeeklyIncome }) {
     setEditingWeekly(false);
   }
 
-  const weeklyBills    = bills.reduce((s, b) => s + Number(b.amount), 0) / 4.33;
-  const dailySpendLimit = avgWeeklyIncome > 0
-    ? Math.max(0, (avgWeeklyIncome - weeklyTarget - weeklyBills) / 7)
+  const weeklyIncome   = sources.reduce((s, src) => s + weeklyEquivalent(src), 0);
+  const weeklyBills    = bills.reduce((s, b) => s + Number(b.weekly_aside || 0), 0);
+  const weeklyNet      = weeklyIncome - weeklyBills;
+  const effectiveIncome = weeklyIncome > 0 ? weeklyIncome : avgWeeklyIncome;
+  const dailySpendLimit = effectiveIncome > 0
+    ? Math.max(0, (effectiveIncome - weeklyTarget - weeklyBills) / 7)
     : weeklyTarget > 0 ? null : null;
 
   return (
     <div style={S.financesContent}>
+      {/* Bank balance + snapshot */}
+      <div style={{ ...S.card, marginBottom:16 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
+          <div style={S.cardTitle}>Bank Balance</div>
+          {!editingBalance && (
+            <button style={{ ...S.btnGhost, fontSize:12, padding:'4px 10px' }} onClick={() => { setEditingBalance(true); setBalanceInput(bankBalance); }}>
+              {bankBalance ? 'Update' : 'Enter balance'}
+            </button>
+          )}
+        </div>
+        {editingBalance ? (
+          <div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:14 }}>
+            <span style={{ fontSize:14, color:'#7a7885' }}>$</span>
+            <input style={{ ...S.input, width:160 }} type="number" placeholder="0.00" value={balanceInput} onChange={e => setBalanceInput(e.target.value)} onKeyDown={e => { if (e.key==='Enter') saveBalance(); if (e.key==='Escape') setEditingBalance(false); }} autoFocus />
+            <button style={S.btnPrimary} onClick={saveBalance}>Save</button>
+            <button style={S.btnGhost} onClick={() => setEditingBalance(false)}>Cancel</button>
+          </div>
+        ) : (
+          <div style={{ fontSize:28, fontWeight:800, color:'#2d2b38', letterSpacing:'-0.5px', marginBottom:14 }}>
+            {bankBalance ? AUD(parseFloat(bankBalance)) : <span style={{ fontSize:16, color:'#b0adb8' }}>Not set</span>}
+          </div>
+        )}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:10 }}>
+          <div style={{ background:'#f8f6ff', borderRadius:10, padding:'10px 12px' }}>
+            <div style={{ fontSize:11, color:'#b0adb8', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:4 }}>Weekly In</div>
+            <div style={{ fontSize:16, fontWeight:700, color:'#5cb88a' }}>
+              {weeklyIncome > 0 ? AUD(weeklyIncome) : <span style={{ fontSize:13, color:'#b0adb8' }}>No sources</span>}
+            </div>
+          </div>
+          <div style={{ background:'#f8f6ff', borderRadius:10, padding:'10px 12px' }}>
+            <div style={{ fontSize:11, color:'#b0adb8', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:4 }}>Weekly Out</div>
+            <div style={{ fontSize:16, fontWeight:700, color:'#e06b6b' }}>
+              {weeklyBills > 0 ? AUD(weeklyBills) : <span style={{ fontSize:13, color:'#b0adb8' }}>No bills</span>}
+            </div>
+          </div>
+          <div style={{ background:'#f8f6ff', borderRadius:10, padding:'10px 12px' }}>
+            <div style={{ fontSize:11, color:'#b0adb8', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:4 }}>Net Weekly</div>
+            <div style={{ fontSize:16, fontWeight:700, color: weeklyNet >= 0 ? '#5cb88a' : '#e06b6b' }}>
+              {weeklyIncome > 0 || weeklyBills > 0
+                ? <>{weeklyNet < 0 ? '−' : '+'}{AUD(Math.abs(weeklyNet))}</>
+                : <span style={{ fontSize:13, color:'#b0adb8' }}>—</span>}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Weekly savings card */}
       <div style={S.weeklyCard}>
         <div style={S.weeklyCardTitle}>Weekly Savings Budget</div>
