@@ -161,6 +161,35 @@ function billDueThisMonth(bill, year, month) {
   }
 }
 
+// Calculate weekly amount to set aside to cover a bill by its next due date.
+// Run once at bill-creation time; stored as weekly_aside on the bill row.
+function calcWeeklyAside(bill) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const dueDay = parseInt(bill.due_day) || 1;
+  let nextDue = null;
+
+  if (bill.recurrence === 'one-off') {
+    if (!bill.due_date) return null;
+    nextDue = new Date(bill.due_date + 'T00:00:00');
+  } else if (bill.recurrence === 'monthly') {
+    let candidate = new Date(today.getFullYear(), today.getMonth(), dueDay);
+    if (candidate <= today) candidate = new Date(today.getFullYear(), today.getMonth() + 1, dueDay);
+    nextDue = candidate;
+  } else {
+    // quarterly / half-yearly / annually — anchor on due_month
+    const dueMonth = bill.due_month ? bill.due_month - 1 : today.getMonth(); // 0-indexed
+    const interval = bill.recurrence === 'annually' ? 12 : bill.recurrence === 'half-yearly' ? 6 : 3;
+    let candidate = new Date(today.getFullYear(), dueMonth, dueDay);
+    // Advance until strictly in the future
+    while (candidate <= today) candidate = new Date(candidate.getFullYear(), candidate.getMonth() + interval, dueDay);
+    nextDue = candidate;
+  }
+
+  if (!nextDue) return null;
+  const weeksLeft = Math.max(1, Math.ceil((nextDue - today) / (7 * 24 * 60 * 60 * 1000)));
+  return Math.round((Number(bill.amount) / weeksLeft) * 100) / 100;
+}
+
 function recurrenceLabel(bill) {
   const r = bill.recurrence || 'monthly';
   if (r === 'monthly') return 'Monthly';
@@ -230,6 +259,7 @@ function BillsTab({ user, online }) {
       category: form.category,
       color: form.color,
     };
+    row.weekly_aside = calcWeeklyAside(row);
     const { data } = await supabase.from('bills').insert(row).select().single();
     if (data) { setBills(prev => [...prev, data]); setAdding(false); setForm(EMPTY_FORM); }
   }
@@ -288,6 +318,11 @@ function BillsTab({ user, online }) {
               {bill.due_day ? ` · due ${ordinal(bill.due_day)}` : ''}
               {bill.is_approximate && <span style={{ color:'#d97706', marginLeft:6 }}>approx.</span>}
             </div>
+            {bill.weekly_aside != null && (
+              <div style={{ fontSize:11, color:'#9996a8', marginTop:2 }}>
+                Set aside <span style={{ fontWeight:600, color:'#6d5fc7' }}>{AUD(bill.weekly_aside)}/wk</span> to cover by due date
+              </div>
+            )}
           </div>
           <div style={S.billAmount(paidIds.has(bill.id))}>
             {bill.is_approximate ? '~' : ''}{AUD(bill.amount)}
