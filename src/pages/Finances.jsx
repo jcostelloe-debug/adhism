@@ -161,6 +161,28 @@ function billDueThisMonth(bill, year, month) {
   }
 }
 
+// Returns the next Date a bill falls due strictly after the given year/month.
+function getNextDueDate(bill, afterYear, afterMonth) {
+  const dueDay = parseInt(bill.due_day) || 1;
+  if (bill.recurrence === 'one-off') {
+    if (!bill.due_date) return null;
+    const d = new Date(bill.due_date + 'T00:00:00');
+    return (d.getFullYear() > afterYear || (d.getFullYear() === afterYear && d.getMonth() > afterMonth)) ? d : null;
+  }
+  if (bill.recurrence === 'monthly') {
+    let m = afterMonth + 1, y = afterYear;
+    if (m > 11) { m = 0; y++; }
+    return new Date(y, m, dueDay);
+  }
+  const interval = bill.recurrence === 'annually' ? 12 : bill.recurrence === 'half-yearly' ? 6 : 3;
+  const dueMonth = bill.due_month ? bill.due_month - 1 : afterMonth;
+  let candidate = new Date(afterYear, dueMonth, dueDay);
+  while (candidate.getFullYear() < afterYear || (candidate.getFullYear() === afterYear && candidate.getMonth() <= afterMonth)) {
+    candidate = new Date(candidate.getFullYear(), candidate.getMonth() + interval, dueDay);
+  }
+  return candidate;
+}
+
 // Calculate weekly amount to set aside to cover a bill by its next due date.
 // Run once at bill-creation time; stored as weekly_aside on the bill row.
 function calcWeeklyAside(bill) {
@@ -176,11 +198,9 @@ function calcWeeklyAside(bill) {
     if (candidate <= today) candidate = new Date(today.getFullYear(), today.getMonth() + 1, dueDay);
     nextDue = candidate;
   } else {
-    // quarterly / half-yearly / annually — anchor on due_month
-    const dueMonth = bill.due_month ? bill.due_month - 1 : today.getMonth(); // 0-indexed
+    const dueMonth = bill.due_month ? bill.due_month - 1 : today.getMonth();
     const interval = bill.recurrence === 'annually' ? 12 : bill.recurrence === 'half-yearly' ? 6 : 3;
     let candidate = new Date(today.getFullYear(), dueMonth, dueDay);
-    // Advance until strictly in the future
     while (candidate <= today) candidate = new Date(candidate.getFullYear(), candidate.getMonth() + interval, dueDay);
     nextDue = candidate;
   }
@@ -229,7 +249,19 @@ function BillsTab({ user, online }) {
   const load = useCallback(async () => {
     const { data: b } = await supabase.from('bills').select('*').eq('user_id', user.id).order('due_day');
     const { data: p } = await supabase.from('bill_payments').select('bill_id').eq('user_id', user.id).eq('month', monthStr);
-    if (b) setBills(b);
+    if (b) {
+      // Backfill weekly_aside for any bills that don't have it yet
+      const needsBackfill = b.filter(bill => bill.weekly_aside == null);
+      if (needsBackfill.length > 0) {
+        await Promise.all(needsBackfill.map(bill => {
+          const weekly_aside = calcWeeklyAside(bill);
+          return supabase.from('bills').update({ weekly_aside }).eq('id', bill.id);
+        }));
+        setBills(b.map(bill => bill.weekly_aside == null ? { ...bill, weekly_aside: calcWeeklyAside(bill) } : bill));
+      } else {
+        setBills(b);
+      }
+    }
     if (p) setPaidIds(new Set(p.map(x => x.bill_id)));
   }, [user.id, monthStr]);
 
@@ -278,6 +310,16 @@ function BillsTab({ user, online }) {
   const totalDue  = visibleBills.reduce((s, b) => s + Number(b.amount), 0);
   const totalPaid = visibleBills.filter(b => paidIds.has(b.id)).reduce((s, b) => s + Number(b.amount), 0);
   const needsRecurrenceMonth = ['quarterly','half-yearly','annually'].includes(form.recurrence);
+
+  // Upcoming: next occurrence of every bill after the current view month, within 12 months
+  const upcomingBills = bills
+    .map(bill => ({ bill, nextDue: getNextDueDate(bill, viewYear, viewMonth) }))
+    .filter(({ nextDue }) => {
+      if (!nextDue) return false;
+      const maxDate = new Date(viewYear, viewMonth + 12, 1);
+      return nextDue < maxDate;
+    })
+    .sort((a, b) => a.nextDue - b.nextDue);
 
   return (
     <div style={S.financesContent}>
@@ -333,6 +375,30 @@ function BillsTab({ user, online }) {
           <span data-del style={{ ...S.todoDelete, opacity:0 }} onClick={() => deleteBill(bill.id)}>×</span>
         </div>
       ))}
+
+      {/* Upcoming bills */}
+      {upcomingBills.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:'#b0adb8', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:10 }}>
+            Upcoming
+          </div>
+          {upcomingBills.map(({ bill, nextDue }) => (
+            <div key={bill.id + nextDue.toISOString()} style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 0', borderBottom:'1px solid #f0edf8' }}>
+              <div style={{ ...S.listDot(bill.color), width:8, height:8, flexShrink:0 }} />
+              <div style={{ flex:1 }}>
+                <span style={{ fontSize:13, fontWeight:500, color:'#2d2b38' }}>{bill.name}</span>
+                {bill.is_approximate && <span style={{ fontSize:11, color:'#d97706', marginLeft:6 }}>approx.</span>}
+              </div>
+              <span style={{ fontSize:12, color:'#9996a8' }}>
+                {nextDue.toLocaleDateString('en-AU', { day:'numeric', month:'short', year: nextDue.getFullYear() !== today.getFullYear() ? 'numeric' : undefined })}
+              </span>
+              <span style={{ fontSize:13, fontWeight:600, color:'#2d2b38', minWidth:70, textAlign:'right' }}>
+                {bill.is_approximate ? '~' : ''}{AUD(bill.amount)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Add bill */}
       {!adding
