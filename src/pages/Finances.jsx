@@ -714,6 +714,335 @@ function StatementsTab({ user, transactions, setTransactions }) {
   );
 }
 
+// ─── Income helpers ───────────────────────────────────────────────────────────
+
+const INCOME_COLORS = ['#4ade80','#60a5fa','#a78bfa','#fb923c','#f472b6','#facc15'];
+const FREQ_LABELS   = { weekly:'Weekly', fortnightly:'Fortnightly', monthly:'Monthly' };
+
+function getWeekStart(date) {
+  const d = new Date(date);
+  const day = d.getDay();
+  d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function toDateStr(date) { return date.toISOString().slice(0, 10); }
+
+function formatWeekRange(ws) {
+  const we = new Date(ws); we.setDate(we.getDate() + 6);
+  const o = { day:'numeric', month:'short' };
+  return `${ws.toLocaleDateString('en-AU', o)} – ${we.toLocaleDateString('en-AU', o)}`;
+}
+
+function incomeForWeek(source, weekStart, entries) {
+  if (source.type === 'variable') {
+    const ws  = toDateStr(weekStart);
+    const ent = entries.find(e => e.income_source_id === source.id && e.week_start === ws);
+    return { amount: ent ? Number(ent.amount) : Number(source.amount), isDefault: !ent };
+  }
+  switch (source.frequency) {
+    case 'weekly':
+      return { amount: Number(source.amount), isDefault: false };
+    case 'fortnightly': {
+      if (!source.next_payment_date) return { amount: Number(source.amount) / 2, isDefault: true };
+      const ref  = getWeekStart(new Date(source.next_payment_date + 'T00:00:00'));
+      const diff = Math.round((weekStart - ref) / (7 * 86400000));
+      return { amount: diff % 2 === 0 ? Number(source.amount) : 0, isDefault: false };
+    }
+    case 'monthly': {
+      if (!source.next_payment_date) return { amount: Number(source.amount) / 4.33, isDefault: true };
+      const payDay = new Date(source.next_payment_date + 'T00:00:00').getDate();
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(weekStart); d.setDate(d.getDate() + i);
+        if (d.getDate() === payDay) return { amount: Number(source.amount), isDefault: false };
+      }
+      return { amount: 0, isDefault: false };
+    }
+    default: return { amount: 0, isDefault: false };
+  }
+}
+
+function getBillsForWeek(bills, weekStart) {
+  const result = [];
+  for (const bill of bills) {
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(weekStart); d.setDate(d.getDate() + i);
+      if (billDueThisMonth(bill, d.getFullYear(), d.getMonth())) {
+        if (bill.due_day && d.getDate() === bill.due_day) { result.push(bill); break; }
+      }
+    }
+  }
+  return result;
+}
+
+// ─── Income source row ────────────────────────────────────────────────────────
+
+function IncomeSourceRow({ source, onDelete }) {
+  return (
+    <div
+      style={{ ...S.billRow(false), marginBottom: 8 }}
+      onMouseEnter={e => { const d = e.currentTarget.querySelector('[data-del]'); if (d) d.style.opacity='1'; }}
+      onMouseLeave={e => { const d = e.currentTarget.querySelector('[data-del]'); if (d) d.style.opacity='0'; }}
+    >
+      <div style={{ ...S.listDot(source.color), width:10, height:10 }} />
+      <div style={{ flex:1 }}>
+        <div style={S.billName}>{source.name}</div>
+        <div style={S.billMeta}>
+          {source.type === 'stable' ? FREQ_LABELS[source.frequency] : 'Variable · set per week'}
+          {source.next_payment_date
+            ? ` · next ${new Date(source.next_payment_date+'T00:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'short'})}`
+            : ''}
+        </div>
+      </div>
+      <div style={S.billAmount(false)}>
+        {source.type === 'variable' ? `${AUD(source.amount)}/wk default` : AUD(source.amount)}
+      </div>
+      <span data-del style={{ ...S.todoDelete, opacity:0 }} onClick={onDelete}>×</span>
+    </div>
+  );
+}
+
+// ─── Income Tab ───────────────────────────────────────────────────────────────
+
+const EMPTY_INCOME_FORM = { name:'', amount:'', frequency:'fortnightly', type:'stable', next_payment_date:'', color: INCOME_COLORS[0] };
+
+function IncomeTab({ user, bills }) {
+  const [sources, setSources]         = useState([]);
+  const [entries, setEntries]         = useState([]);
+  const [adding, setAdding]           = useState(false);
+  const [form, setForm]               = useState(EMPTY_INCOME_FORM);
+  const [editingEntry, setEditingEntry] = useState(null); // `${sourceId}__${weekStr}`
+  const [entryInput, setEntryInput]   = useState('');
+
+  const weeks = Array.from({ length: 4 }, (_, i) => {
+    const ws = getWeekStart(new Date());
+    ws.setDate(ws.getDate() + i * 7);
+    return ws;
+  });
+
+  useEffect(() => {
+    supabase.from('income_sources').select('*').eq('user_id', user.id).order('created_at')
+      .then(({ data }) => { if (data) setSources(data); });
+    const from = toDateStr(weeks[0]);
+    const to   = toDateStr(new Date(weeks[3].getTime() + 7 * 86400000));
+    supabase.from('income_entries').select('*').eq('user_id', user.id)
+      .gte('week_start', from).lt('week_start', to)
+      .then(({ data }) => { if (data) setEntries(data); });
+  }, [user.id]);
+
+  async function addSource() {
+    if (!form.name.trim() || !form.amount) return;
+    const row = {
+      user_id: user.id, name: form.name.trim(), amount: parseFloat(form.amount),
+      frequency: form.frequency, type: form.type,
+      next_payment_date: form.next_payment_date || null, color: form.color,
+    };
+    const { data } = await supabase.from('income_sources').insert(row).select().single();
+    if (data) { setSources(prev => [...prev, data]); setAdding(false); setForm(EMPTY_INCOME_FORM); }
+  }
+
+  async function deleteSource(id) {
+    setSources(prev => prev.filter(s => s.id !== id));
+    await supabase.from('income_sources').delete().eq('id', id);
+  }
+
+  async function saveEntry(sourceId, weekStr, amount) {
+    const amt = parseFloat(amount);
+    if (isNaN(amt)) return;
+    const row = { user_id: user.id, income_source_id: sourceId, week_start: weekStr, amount: amt };
+    const { data } = await supabase.from('income_entries')
+      .upsert(row, { onConflict: 'income_source_id,week_start' }).select().single();
+    if (data) setEntries(prev => [...prev.filter(e => !(e.income_source_id===sourceId && e.week_start===weekStr)), data]);
+    setEditingEntry(null);
+  }
+
+  const stable   = sources.filter(s => s.type === 'stable');
+  const variable = sources.filter(s => s.type === 'variable');
+
+  return (
+    <div style={S.financesContent}>
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, alignItems:'start' }}>
+
+        {/* ── Left: sources ── */}
+        <div>
+          <div style={{ ...S.cardTitle, marginBottom:10 }}>Stable Income</div>
+          {stable.length === 0 && <div style={{ fontSize:13, color:'#b0adb8', marginBottom:12 }}>No stable income added yet</div>}
+          {stable.map(s => <IncomeSourceRow key={s.id} source={s} onDelete={() => deleteSource(s.id)} />)}
+
+          <div style={{ ...S.cardTitle, marginTop:24, marginBottom:10 }}>Variable Income</div>
+          <div style={{ fontSize:12, color:'#b0adb8', marginBottom:10 }}>Set a default weekly amount — then edit individual weeks in the forecast.</div>
+          {variable.length === 0 && <div style={{ fontSize:13, color:'#b0adb8', marginBottom:12 }}>No variable income added yet</div>}
+          {variable.map(s => <IncomeSourceRow key={s.id} source={s} onDelete={() => deleteSource(s.id)} />)}
+
+          {!adding ? (
+            <button style={{ ...S.btnGhost, marginTop:8 }} onClick={() => setAdding(true)}>+ Add Income Source</button>
+          ) : (
+            <div style={{ ...S.addFormBox, marginTop:12 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#9996a8', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:12 }}>New Income Source</div>
+
+              <div style={{ display:'flex', gap:8, marginBottom:12 }}>
+                {['stable','variable'].map(t => (
+                  <button key={t}
+                    style={{ flex:1, padding:'8px', borderRadius:8, fontSize:13, fontWeight:600, cursor:'pointer',
+                      backgroundColor: form.type===t ? '#eeebf9' : 'transparent',
+                      border: form.type===t ? '1px solid #c4bbf0' : '1px solid #ddd9d3',
+                      color: form.type===t ? '#6d5fc7' : '#9996a8',
+                      fontFamily:"'DM Sans', system-ui, sans-serif" }}
+                    onClick={() => setForm(f => ({...f, type:t}))}
+                  >
+                    {t.charAt(0).toUpperCase()+t.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              <div style={S.twoCol}>
+                <div>
+                  <label style={S.fieldLabel}>Name</label>
+                  <input style={S.input} placeholder={form.type==='stable' ? 'e.g. Pension' : 'e.g. Casual Work'} value={form.name} onChange={e => setForm(f => ({...f, name:e.target.value}))} />
+                </div>
+                <div>
+                  <label style={S.fieldLabel}>{form.type==='variable' ? 'Default Weekly Amt' : 'Amount (AUD)'}</label>
+                  <input style={S.input} type="number" placeholder="0.00" value={form.amount} onChange={e => setForm(f => ({...f, amount:e.target.value}))} />
+                </div>
+              </div>
+
+              {form.type === 'stable' && (
+                <div style={S.twoCol}>
+                  <div>
+                    <label style={S.fieldLabel}>Frequency</label>
+                    <select style={{ ...S.input, cursor:'pointer' }} value={form.frequency} onChange={e => setForm(f => ({...f, frequency:e.target.value}))}>
+                      <option value="weekly">Weekly</option>
+                      <option value="fortnightly">Fortnightly</option>
+                      <option value="monthly">Monthly</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={S.fieldLabel}>Next Payment Date</label>
+                    <input type="date" style={{ ...S.dateInput, width:'100%' }} value={form.next_payment_date} onChange={e => setForm(f => ({...f, next_payment_date:e.target.value}))} />
+                  </div>
+                </div>
+              )}
+
+              <label style={S.fieldLabel}>Colour</label>
+              <div style={{ display:'flex', gap:8, marginBottom:14 }}>
+                {INCOME_COLORS.map(c => (
+                  <div key={c} onClick={() => setForm(f => ({...f, color:c}))} style={{ width:18, height:18, borderRadius:'50%', backgroundColor:c, cursor:'pointer', border: form.color===c ? '2px solid #6d5fc7' : '2px solid transparent' }} />
+                ))}
+              </div>
+
+              <div style={{ display:'flex', gap:8 }}>
+                <button style={S.btnPrimary} onClick={addSource}>Save</button>
+                <button style={S.btnGhost} onClick={() => { setAdding(false); setForm(EMPTY_INCOME_FORM); }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Right: 4-week forecast ── */}
+        <div>
+          <div style={{ ...S.cardTitle, marginBottom:10 }}>4-Week Forecast</div>
+          {sources.length === 0 && (
+            <div style={{ ...S.emptyState, paddingTop:40 }}>Add income sources to see your forecast</div>
+          )}
+          {sources.length > 0 && weeks.map((weekStart, i) => {
+            const weekStr   = toDateStr(weekStart);
+            const weekBills = getBillsForWeek(bills, weekStart);
+            const billTotal = weekBills.reduce((s, b) => s + Number(b.amount), 0);
+            const incTotal  = sources.reduce((s, src) => s + incomeForWeek(src, weekStart, entries).amount, 0);
+            const net       = incTotal - billTotal;
+
+            return (
+              <div key={weekStr} style={{ ...S.card, marginBottom:12 }}>
+                {/* Week header */}
+                <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:12 }}>
+                  <div>
+                    <div style={{ fontSize:13, fontWeight:700, color:'#2d2b38' }}>Week {i+1}</div>
+                    <div style={{ fontSize:11, color:'#b0adb8' }}>{formatWeekRange(weekStart)}</div>
+                  </div>
+                  <div style={{ textAlign:'right' }}>
+                    <div style={{ fontSize:20, fontWeight:800, letterSpacing:'-0.5px', color: net >= 0 ? '#5cb88a' : '#e06b6b' }}>
+                      {net < 0 ? '-' : ''}{AUD(Math.abs(net))}
+                    </div>
+                    <div style={{ fontSize:11, color:'#b0adb8' }}>
+                      {net >= 0 ? `${AUD(net/7)}/day available` : 'shortfall'}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Income rows */}
+                {sources.map(src => {
+                  const { amount, isDefault } = incomeForWeek(src, weekStart, entries);
+                  if (src.type === 'stable' && amount === 0) return null;
+                  const eKey     = `${src.id}__${weekStr}`;
+                  const isEditing = editingEntry === eKey;
+
+                  return (
+                    <div key={src.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 0', borderBottom:'1px solid #f5f3f0' }}>
+                      <div style={{ ...S.listDot(src.color), width:7, height:7 }} />
+                      <span style={{ flex:1, fontSize:13, color:'#7a7885' }}>
+                        {src.name}
+                        {src.type==='variable' && isDefault && <span style={{ color:'#c0bccc' }}> (default)</span>}
+                      </span>
+                      {src.type === 'variable' ? (
+                        isEditing ? (
+                          <div style={{ display:'flex', gap:6 }}>
+                            <input
+                              style={{ ...S.input, width:90, padding:'4px 8px', fontSize:13 }}
+                              type="number" value={entryInput}
+                              onChange={e => setEntryInput(e.target.value)}
+                              onKeyDown={e => { if (e.key==='Enter') saveEntry(src.id, weekStr, entryInput); if (e.key==='Escape') setEditingEntry(null); }}
+                              autoFocus
+                            />
+                            <button style={{ ...S.btnPrimary, padding:'4px 10px', fontSize:12 }} onClick={() => saveEntry(src.id, weekStr, entryInput)}>✓</button>
+                            <button style={{ ...S.btnGhost, padding:'4px 8px', fontSize:12 }} onClick={() => setEditingEntry(null)}>✕</button>
+                          </div>
+                        ) : (
+                          <span
+                            style={{ fontSize:13, fontWeight:600, color:'#2d2b38', cursor:'pointer', textDecoration:'underline', textDecorationStyle:'dashed', textDecorationColor:'#c4bbf0' }}
+                            title="Click to set this week's actual amount"
+                            onClick={() => { setEditingEntry(eKey); setEntryInput(String(amount)); }}
+                          >
+                            {AUD(amount)}
+                          </span>
+                        )
+                      ) : (
+                        <span style={{ fontSize:13, fontWeight:600, color:'#2d2b38' }}>{AUD(amount)}</span>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Bills */}
+                {weekBills.length > 0 && (
+                  <>
+                    <div style={{ fontSize:10, fontWeight:700, color:'#c0bccc', textTransform:'uppercase', letterSpacing:'0.5px', margin:'10px 0 5px' }}>Bills Due</div>
+                    {weekBills.map(bill => (
+                      <div key={bill.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 0' }}>
+                        <div style={{ ...S.listDot(bill.color), width:7, height:7 }} />
+                        <span style={{ flex:1, fontSize:13, color:'#e06b6b' }}>{bill.name}</span>
+                        <span style={{ fontSize:13, fontWeight:600, color:'#e06b6b' }}>−{bill.is_approximate ? '~' : ''}{AUD(bill.amount)}</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+
+                {/* Divider + totals */}
+                <div style={{ borderTop:'1px solid #ece9e3', marginTop:10, paddingTop:8, display:'flex', justifyContent:'space-between' }}>
+                  <span style={{ fontSize:12, color:'#b0adb8' }}>Income {AUD(incTotal)} · Bills {AUD(billTotal)}</span>
+                  <span style={{ fontSize:12, fontWeight:700, color: net >= 0 ? '#5cb88a' : '#e06b6b' }}>
+                    Net {net < 0 ? '-' : ''}{AUD(Math.abs(net))}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function Finances({ user }) {
@@ -721,7 +1050,6 @@ export default function Finances({ user }) {
   const [bills, setBills]           = useState([]);
   const [transactions, setTransactions] = useState([]);
 
-  // Load bills at top level so SavingsTab can use them for weekly calc
   useEffect(() => {
     supabase.from('bills').select('*').eq('user_id', user.id)
       .then(({ data }) => { if (data) setBills(data); });
@@ -734,7 +1062,7 @@ export default function Finances({ user }) {
   return (
     <div style={S.financesPage}>
       <div style={S.financesTabBar}>
-        {['bills','savings','statements'].map(t => (
+        {['bills','income','savings','statements'].map(t => (
           <button key={t} style={S.financesTab(tab === t)} onClick={() => setTab(t)}>
             {t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
@@ -742,6 +1070,7 @@ export default function Finances({ user }) {
       </div>
 
       {tab === 'bills'      && <BillsTab      user={user} online={navigator.onLine} bills={bills} />}
+      {tab === 'income'     && <IncomeTab     user={user} bills={bills} />}
       {tab === 'savings'    && <SavingsTab    user={user} bills={bills} avgWeeklyIncome={avgWeeklyIncome} />}
       {tab === 'statements' && <StatementsTab user={user} transactions={transactions} setTransactions={setTransactions} />}
     </div>
