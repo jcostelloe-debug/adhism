@@ -1279,6 +1279,23 @@ function CreditCardTab({ user }) {
     if (data) { setCards(prev => [...prev, data]); setSelectedCardId(data.id); setAddingCard(false); setCardForm({ name:'', credit_limit:'', current_balance:'' }); }
   }
 
+  // Sync the linked bill to reflect total monthly obligation (plans + spend)
+  async function syncBill(card, totalAmount) {
+    const billBase = { user_id: user.id, name: `${card.name} – Monthly`, recurrence: 'monthly', category: 'Credit Card', color: '#a78bfa', due_day: 1 };
+    const wa = calcWeeklyAside({ ...billBase, amount: totalAmount });
+    if (card.monthly_bill_id) {
+      await supabase.from('bills').update({ amount: totalAmount, weekly_aside: wa }).eq('id', card.monthly_bill_id);
+    } else {
+      const { data: bill } = await supabase.from('bills').insert({ ...billBase, amount: totalAmount, weekly_aside: wa }).select().single();
+      if (bill) {
+        await supabase.from('credit_cards').update({ monthly_bill_id: bill.id }).eq('id', card.id);
+        setCards(prev => prev.map(c => c.id === card.id ? { ...c, monthly_bill_id: bill.id } : c));
+        return { ...card, monthly_bill_id: bill.id };
+      }
+    }
+    return card;
+  }
+
   async function saveMonthlySpend() {
     const amount = parseFloat(monthlyInput);
     if (!selectedCard || isNaN(amount)) return;
@@ -1286,21 +1303,7 @@ function CreditCardTab({ user }) {
     const { data: entry } = await supabase.from('credit_card_monthly')
       .upsert(row, { onConflict: 'card_id,month' }).select().single();
     if (entry) setMonthlyEntry(entry);
-
-    // Create or update linked bill
-    const billBase = { user_id: user.id, name: `${selectedCard.name} – Monthly`, recurrence: 'monthly', category: 'Credit Card', color: '#a78bfa', due_day: 1 };
-    if (selectedCard.monthly_bill_id) {
-      const wa = calcWeeklyAside({ ...billBase, amount });
-      await supabase.from('bills').update({ amount, weekly_aside: wa }).eq('id', selectedCard.monthly_bill_id);
-    } else {
-      const billRow = { ...billBase, amount };
-      billRow.weekly_aside = calcWeeklyAside(billRow);
-      const { data: bill } = await supabase.from('bills').insert(billRow).select().single();
-      if (bill) {
-        await supabase.from('credit_cards').update({ monthly_bill_id: bill.id }).eq('id', selectedCardId);
-        setCards(prev => prev.map(c => c.id === selectedCardId ? { ...c, monthly_bill_id: bill.id } : c));
-      }
-    }
+    await syncBill(selectedCard, planTotal + amount);
     setEditingMonthly(false);
   }
 
@@ -1308,12 +1311,22 @@ function CreditCardTab({ user }) {
     if (!planForm.name.trim() || !planForm.monthly_amount || !planForm.payments_left) return;
     const row = { user_id: user.id, card_id: selectedCardId, name: planForm.name.trim(), monthly_amount: parseFloat(planForm.monthly_amount), payments_left: parseInt(planForm.payments_left) };
     const { data } = await supabase.from('credit_card_plans').insert(row).select().single();
-    if (data) { setPlans(prev => [...prev, data]); setAddingPlan(false); setPlanForm({ name:'', monthly_amount:'', payments_left:'' }); }
+    if (data) {
+      const newPlans = [...plans, data];
+      setPlans(newPlans);
+      setAddingPlan(false);
+      setPlanForm({ name:'', monthly_amount:'', payments_left:'' });
+      const newPlanTotal = newPlans.filter(p => p.payments_left > 0).reduce((s, p) => s + Number(p.monthly_amount), 0);
+      await syncBill(selectedCard, newPlanTotal + monthlyAmount);
+    }
   }
 
   async function deletePlan(id) {
-    setPlans(prev => prev.filter(p => p.id !== id));
+    const newPlans = plans.filter(p => p.id !== id);
+    setPlans(newPlans);
     await supabase.from('credit_card_plans').delete().eq('id', id);
+    const newPlanTotal = newPlans.filter(p => p.payments_left > 0).reduce((s, p) => s + Number(p.monthly_amount), 0);
+    await syncBill(selectedCard, newPlanTotal + monthlyAmount);
   }
 
   async function confirmCloseMonth() {
@@ -1405,10 +1418,17 @@ function CreditCardTab({ user }) {
                 <button style={S.btnGhost} onClick={() => setEditingMonthly(false)}>Cancel</button>
               </div>
             ) : (
-              <div style={{ display:'flex', alignItems:'baseline', gap:8 }}>
-                <span style={{ fontSize:24, fontWeight:800, color:'#2d2b38' }}>{monthlyAmount > 0 ? AUD(monthlyAmount) : <span style={{ fontSize:15, color:'#b0adb8' }}>Not set</span>}</span>
-                {monthlyAmount > 0 && <span style={{ fontSize:12, color:'#b0adb8' }}>added to bills automatically</span>}
-                {monthClosed && <span style={{ fontSize:11, color:'#5cb88a', background:'#edfdf6', padding:'2px 8px', borderRadius:20 }}>Month closed</span>}
+              <div>
+                <div style={{ display:'flex', alignItems:'baseline', gap:8, marginBottom: planTotal > 0 ? 8 : 0 }}>
+                  <span style={{ fontSize:24, fontWeight:800, color:'#2d2b38' }}>{(planTotal + monthlyAmount) > 0 ? AUD(planTotal + monthlyAmount) : <span style={{ fontSize:15, color:'#b0adb8' }}>Not set</span>}</span>
+                  {(planTotal + monthlyAmount) > 0 && <span style={{ fontSize:12, color:'#b0adb8' }}>total due this month · in bills</span>}
+                  {monthClosed && <span style={{ fontSize:11, color:'#5cb88a', background:'#edfdf6', padding:'2px 8px', borderRadius:20 }}>Month closed</span>}
+                </div>
+                {planTotal > 0 && monthlyAmount > 0 && (
+                  <div style={{ fontSize:12, color:'#9996a8' }}>
+                    {AUD(monthlyAmount)} spend + {AUD(planTotal)} plan payments
+                  </div>
+                )}
               </div>
             )}
           </div>
