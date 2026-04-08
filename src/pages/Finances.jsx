@@ -88,83 +88,73 @@ function categorize(desc) {
   return 'Other';
 }
 
-function parseCSV(text) {
-  // Strip BOM and normalise line endings
-  const clean = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const allLines = clean.split('\n');
-
-  // Auto-detect delimiter: tab, semicolon, or comma
-  const sample = allLines.find(l => l.trim()) || '';
-  const tabCount    = (sample.match(/\t/g) || []).length;
-  const semicolCount = (sample.match(/;/g) || []).length;
-  const commaCount  = (sample.match(/,/g) || []).length;
-  const delim = tabCount > commaCount && tabCount > semicolCount ? '\t'
-              : semicolCount > commaCount ? ';'
-              : ',';
-
+function attemptParse(allLines, delim) {
   function splitRow(line) {
     if (delim === '\t') return line.split('\t').map(c => c.replace(/^"|"$/g,'').trim());
     if (delim === ';')  return line.split(';').map(c => c.replace(/^"|"$/g,'').trim());
     return parseCSVRow(line);
   }
 
-  // Find the header row — first row where a cell looks like a column heading
-  // (skip bank metadata rows that appear before the actual table)
   const HEADER_HINTS = ['date','amount','debit','credit','description','narration','particulars','details','balance','transaction'];
   let headerIdx = 0;
   for (let i = 0; i < Math.min(allLines.length, 10); i++) {
     const cells = splitRow(allLines[i]).map(c => c.toLowerCase().trim());
-    if (cells.filter(c => HEADER_HINTS.some(h => c.includes(h))).length >= 2) {
-      headerIdx = i;
-      break;
-    }
+    if (cells.filter(c => HEADER_HINTS.some(h => c.includes(h))).length >= 2) { headerIdx = i; break; }
   }
 
   const lines = allLines.slice(headerIdx).filter(l => l.trim());
   if (lines.length < 2) return [];
 
   const cols = splitRow(lines[0]).map(c => c.toLowerCase().replace(/"/g,'').trim());
+  if (cols.length < 2) return [];
 
-  const dateIdx  = cols.findIndex(c => c.includes('date') || c === 'dt');
-  const descIdx  = cols.findIndex(c =>
-    ['description','details','narration','particulars','merchant name','transaction details','reference','memo'].some(k => c.includes(k))
-  );
-  const debitIdx  = cols.findIndex(c => ['debit','withdrawal','debit amount','withdrawals'].some(k => c.includes(k)));
-  const creditIdx = cols.findIndex(c => ['credit','deposit','credit amount','deposits'].some(k => c.includes(k)));
-  const amtIdx    = cols.findIndex(c => c === 'amount' || c === 'amount (aud)' || c === 'transaction amount');
+  const dateIdx   = cols.findIndex(c => c.includes('date') || c === 'dt');
+  const descIdx   = cols.findIndex(c => ['description','details','narration','particulars','merchant name','transaction details','reference','memo'].some(k => c.includes(k)));
+  const debitIdx  = cols.findIndex(c => c.includes('debit') || c.includes('withdrawal'));
+  const creditIdx = cols.findIndex(c => c.includes('credit') || c.includes('deposit'));
+  const amtIdx    = cols.findIndex(c => c.includes('amount'));
 
-  // Fallback: if still no amount column, look for any column with 'amount'
-  const amtFallback = amtIdx === -1 ? cols.findIndex(c => c.includes('amount')) : amtIdx;
+  const cleanVal = (v) => (v || '').replace(/"/g,'').replace(/[$,\s]/g,'').trim();
 
   const txns = [];
   for (let i = 1; i < lines.length; i++) {
     const row = splitRow(lines[i]);
     if (!row || row.length < 2) continue;
 
-    const clean = (v) => (v || '').replace(/"/g,'').replace(/[$,\s]/g,'').trim();
-
     let amount = 0;
     if (debitIdx !== -1 && creditIdx !== -1) {
-      const dRaw = clean(row[debitIdx] || '');
-      const cRaw = clean(row[creditIdx] || '');
+      const dRaw = cleanVal(row[debitIdx] || '');
+      const cRaw = cleanVal(row[creditIdx] || '');
       const d = dRaw ? parseFloat(dRaw) || 0 : 0;
       const c = cRaw ? parseFloat(cRaw) || 0 : 0;
       amount = c > 0 ? c : -d;
+    } else if (amtIdx !== -1) {
+      amount = parseFloat(cleanVal(row[amtIdx])) || 0;
     } else {
-      const idx = amtFallback !== -1 ? amtFallback : (dateIdx === 0 ? 1 : 0);
-      amount = parseFloat(clean(row[idx])) || 0;
+      // last resort: pick first numeric-looking cell that isn't the date
+      for (let j = 1; j < row.length; j++) {
+        const v = parseFloat(cleanVal(row[j]));
+        if (!isNaN(v) && v !== 0) { amount = v; break; }
+      }
     }
 
     const rawDate = (dateIdx >= 0 ? row[dateIdx] : row[0])?.replace(/"/g,'').trim();
     const date = parseDate(rawDate);
-
-    // Description: use detected column, else try col 2, else col 1
-    const rawDesc = (descIdx >= 0 ? row[descIdx] : row[Math.min(2, row.length-1)])?.replace(/"/g,'').trim() || '';
+    const rawDesc = (descIdx >= 0 ? row[descIdx] : row[Math.min(2, row.length - 1)])?.replace(/"/g,'').trim() || '';
 
     if (!date || isNaN(amount) || !rawDesc) continue;
     txns.push({ date, description: rawDesc, amount, category: categorize(rawDesc) });
   }
   return txns;
+}
+
+function parseCSV(text) {
+  const cleaned = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const allLines = cleaned.split('\n');
+
+  // Try all three delimiters, keep whichever produces the most valid rows
+  const results = ['\t', ',', ';'].map(d => attemptParse(allLines, d));
+  return results.reduce((best, cur) => cur.length > best.length ? cur : best, []);
 }
 
 // Normalize a transaction description to a stable merchant key
