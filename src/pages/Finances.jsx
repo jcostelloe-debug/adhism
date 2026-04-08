@@ -69,11 +69,18 @@ function parseCSV(text) {
   const clean = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const allLines = clean.split('\n');
 
-  // Auto-detect delimiter (comma or semicolon)
-  const delim = (allLines.find(l => l.includes(';')) && !allLines[0].includes(',')) ? ';' : ',';
+  // Auto-detect delimiter: tab, semicolon, or comma
+  const sample = allLines.find(l => l.trim()) || '';
+  const tabCount    = (sample.match(/\t/g) || []).length;
+  const semicolCount = (sample.match(/;/g) || []).length;
+  const commaCount  = (sample.match(/,/g) || []).length;
+  const delim = tabCount > commaCount && tabCount > semicolCount ? '\t'
+              : semicolCount > commaCount ? ';'
+              : ',';
 
   function splitRow(line) {
-    if (delim === ';') return line.split(';').map(c => c.replace(/^"|"$/g,'').trim());
+    if (delim === '\t') return line.split('\t').map(c => c.replace(/^"|"$/g,'').trim());
+    if (delim === ';')  return line.split(';').map(c => c.replace(/^"|"$/g,'').trim());
     return parseCSVRow(line);
   }
 
