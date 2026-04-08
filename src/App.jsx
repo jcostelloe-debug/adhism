@@ -27,6 +27,8 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState('dashboard');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -37,6 +39,12 @@ export default function App() {
       setSession(session);
     });
     return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
   }, []);
 
   if (loading) {
@@ -67,12 +75,35 @@ export default function App() {
   return (
     <div style={S.app}>
       <UpdateBanner />
-      <Sidebar page={page} setPage={setPage} />
+      <Sidebar
+        page={page}
+        setPage={(p) => { setPage(p); if (isMobile) setSidebarOpen(false); }}
+        isMobile={isMobile}
+        sidebarOpen={sidebarOpen}
+        setSidebarOpen={setSidebarOpen}
+      />
+      {/* Backdrop for mobile drawer */}
+      {isMobile && sidebarOpen && (
+        <div
+          onClick={() => setSidebarOpen(false)}
+          style={{ position:'fixed', inset:0, backgroundColor:'rgba(0,0,0,0.3)', zIndex:99 }}
+        />
+      )}
       <div style={S.main}>
         <div style={S.topbar}>
-          <div>
-            <div style={S.topbarTitle}>{PAGE_TITLES[page]}</div>
-            <div style={S.topbarDate}>{formatDate(new Date())}</div>
+          <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+            {isMobile && (
+              <button
+                onClick={() => setSidebarOpen(o => !o)}
+                style={{ background:'none', border:'none', cursor:'pointer', padding:'4px 6px', borderRadius:8, fontSize:20, color:'#6d5fc7', lineHeight:1 }}
+              >
+                ☰
+              </button>
+            )}
+            <div>
+              <div style={S.topbarTitle}>{PAGE_TITLES[page]}</div>
+              <div style={S.topbarDate}>{formatDate(new Date())}</div>
+            </div>
           </div>
           <div style={S.userBadge}>
             <span>{user.user_metadata?.full_name || user.email}</span>
