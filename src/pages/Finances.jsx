@@ -95,6 +95,98 @@ function parseCSV(text) {
   return txns;
 }
 
+// Normalize a transaction description to a stable merchant key
+function normDesc(desc) {
+  return desc.toLowerCase()
+    .replace(/\d{4,}/g, '')       // strip long reference numbers
+    .replace(/[*&#@|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ').slice(0, 4).join(' ');
+}
+
+// Detect recurring and subscription transactions
+function detectRecurring(transactions) {
+  const expenses = transactions.filter(t => t.amount < 0);
+  const groups = {};
+  for (const t of expenses) {
+    const key = normDesc(t.description);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(t);
+  }
+
+  const recurring = [];
+  const subscriptions = [];
+
+  for (const txns of Object.values(groups)) {
+    if (txns.length < 2) continue;
+    txns.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    const gaps = [];
+    for (let i = 1; i < txns.length; i++) {
+      gaps.push((new Date(txns[i].date) - new Date(txns[i-1].date)) / 86400000);
+    }
+    const avgGap = gaps.reduce((s, g) => s + g, 0) / gaps.length;
+    const maxDev = Math.max(...gaps.map(g => Math.abs(g - avgGap)));
+    // Reject if gaps are too erratic (unless there are many occurrences)
+    if (maxDev > 12 && txns.length < 4) continue;
+
+    let frequency = null;
+    if (avgGap >= 5  && avgGap <= 9)  frequency = 'Weekly';
+    else if (avgGap >= 12 && avgGap <= 16) frequency = 'Fortnightly';
+    else if (avgGap >= 25 && avgGap <= 35) frequency = 'Monthly';
+    else if (avgGap >= 55 && avgGap <= 70) frequency = 'Bi-monthly';
+    else if (txns.length >= 3) frequency = `Every ~${Math.round(avgGap)} days`;
+    if (!frequency) continue;
+
+    const amounts = txns.map(t => Math.abs(t.amount));
+    const avgAmt  = amounts.reduce((s, a) => s + a, 0) / amounts.length;
+    const consistent = amounts.every(a => Math.abs(a - avgAmt) < avgAmt * 0.15);
+
+    const item = {
+      name: txns[txns.length - 1].description,
+      frequency,
+      avgAmt,
+      consistent,
+      count: txns.length,
+      lastDate: txns[txns.length - 1].date,
+      category: txns[0].category,
+    };
+
+    const isSub = consistent && (frequency === 'Monthly' || frequency === 'Weekly' || frequency === 'Fortnightly')
+      && (avgAmt < 60 || ['Streaming','Telecom','Subscription'].includes(txns[0].category));
+
+    if (isSub) subscriptions.push(item);
+    else recurring.push(item);
+  }
+
+  subscriptions.sort((a, b) => b.avgAmt - a.avgAmt);
+  recurring.sort((a, b) => b.avgAmt - a.avgAmt);
+  return { recurring, subscriptions };
+}
+
+// Compare last 30 days vs previous 30 days per category
+function detectTrends(transactions) {
+  const now = new Date();
+  const d30 = new Date(now); d30.setDate(now.getDate() - 30);
+  const d60 = new Date(now); d60.setDate(now.getDate() - 60);
+
+  const recent = {}, prior = {};
+  for (const t of transactions.filter(t => t.amount < 0)) {
+    const d = new Date(t.date);
+    const a = Math.abs(t.amount);
+    if (d >= d30)       recent[t.category] = (recent[t.category] || 0) + a;
+    else if (d >= d60)  prior[t.category]  = (prior[t.category]  || 0) + a;
+  }
+
+  return Object.keys(recent)
+    .filter(cat => prior[cat] && prior[cat] > 10)
+    .map(cat => ({ category: cat, recent: recent[cat], prior: prior[cat], pct: ((recent[cat] - prior[cat]) / prior[cat]) * 100 }))
+    .filter(r => Math.abs(r.pct) >= 15)
+    .sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))
+    .slice(0, 6);
+}
+
 function analyseTransactions(transactions) {
   const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 90);
   const recent = transactions.filter(t => new Date(t.date) >= cutoff);
@@ -130,7 +222,10 @@ function analyseTransactions(transactions) {
   if (!tips.length)
     tips.push({ icon: '✅', text: 'No major spending red flags detected based on your statements.' });
 
-  return { monthlyByCategory, avgWeeklyIncome, tips };
+  const { recurring, subscriptions } = detectRecurring(transactions);
+  const trends = detectTrends(transactions);
+
+  return { monthlyByCategory, avgWeeklyIncome, tips, recurring, subscriptions, trends };
 }
 
 // ─── Bills helpers ────────────────────────────────────────────────────────────
@@ -798,9 +893,9 @@ function StatementsTab({ user, transactions, setTransactions }) {
     setTransactions([]);
   }
 
-  const { monthlyByCategory, avgWeeklyIncome, tips } = transactions.length > 0
+  const { monthlyByCategory, avgWeeklyIncome, tips, recurring, subscriptions, trends } = transactions.length > 0
     ? analyseTransactions(transactions)
-    : { monthlyByCategory: {}, avgWeeklyIncome: 0, tips: [] };
+    : { monthlyByCategory: {}, avgWeeklyIncome: 0, tips: [], recurring: [], subscriptions: [], trends: [] };
 
   const sortedCats = Object.entries(monthlyByCategory).sort((a,b) => b[1]-a[1]);
   const maxCat     = sortedCats[0]?.[1] || 1;
@@ -865,6 +960,74 @@ function StatementsTab({ user, transactions, setTransactions }) {
               <div style={S.tipText}>{tip.text}</div>
             </div>
           ))}
+
+          {/* Spending Trends */}
+          {trends.length > 0 && (
+            <>
+              <div style={{ ...S.cardTitle, marginBottom:14, marginTop:24 }}>Spending Trends</div>
+              <div style={{ ...S.card, marginBottom:24 }}>
+                <div style={{ fontSize:12, color:'#b0adb8', marginBottom:12 }}>Comparing last 30 days vs prior 30 days</div>
+                {trends.map(t => (
+                  <div key={t.category} style={{ display:'flex', alignItems:'center', gap:12, padding:'8px 0', borderBottom:'1px solid #f5f3f0' }}>
+                    <div style={{ ...S.listDot(CAT_COLORS[t.category] || '#aaa'), width:8, height:8, flexShrink:0 }} />
+                    <span style={{ flex:1, fontSize:13, color:'#2d2b38' }}>{t.category}</span>
+                    <span style={{ fontSize:12, color:'#9996a8' }}>{AUD(t.prior)} → {AUD(t.recent)}</span>
+                    <span style={{ fontSize:13, fontWeight:700, color: t.pct > 0 ? '#e06b6b' : '#5cb88a', minWidth:54, textAlign:'right' }}>
+                      {t.pct > 0 ? '▲' : '▼'} {Math.abs(t.pct).toFixed(0)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Potential Subscriptions */}
+          {subscriptions.length > 0 && (
+            <>
+              <div style={{ ...S.cardTitle, marginBottom:14 }}>Potential Subscriptions</div>
+              <div style={{ ...S.card, marginBottom:24 }}>
+                <div style={{ fontSize:12, color:'#b0adb8', marginBottom:12 }}>Regular charges at consistent amounts — check these are still being used</div>
+                {subscriptions.map((s, i) => (
+                  <div key={i} style={{ display:'flex', alignItems:'center', gap:12, padding:'8px 0', borderBottom: i < subscriptions.length-1 ? '1px solid #f5f3f0' : 'none' }}>
+                    <div style={{ ...S.listDot(CAT_COLORS[s.category] || '#a78bfa'), width:8, height:8, flexShrink:0 }} />
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:500, color:'#2d2b38' }}>{s.name}</div>
+                      <div style={{ fontSize:11, color:'#9996a8', marginTop:2 }}>{s.frequency} · seen {s.count}× · last {s.lastDate}</div>
+                    </div>
+                    <span style={{ fontSize:13, fontWeight:700, color:'#6d5fc7' }}>{AUD(s.avgAmt)}</span>
+                  </div>
+                ))}
+                <div style={{ fontSize:12, color:'#b0adb8', marginTop:10 }}>
+                  Total: <strong style={{ color:'#6d5fc7' }}>{AUD(subscriptions.reduce((s, x) => s + x.avgAmt, 0))}/month</strong> across {subscriptions.length} subscription{subscriptions.length !== 1 ? 's' : ''}
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Recurring Expenditure */}
+          {recurring.length > 0 && (
+            <>
+              <div style={{ ...S.cardTitle, marginBottom:14 }}>Recurring Expenditure</div>
+              <div style={{ ...S.card, marginBottom:24 }}>
+                <div style={{ fontSize:12, color:'#b0adb8', marginBottom:12 }}>Regular payments detected from your transaction history</div>
+                {recurring.map((r, i) => (
+                  <div key={i} style={{ display:'flex', alignItems:'center', gap:12, padding:'8px 0', borderBottom: i < recurring.length-1 ? '1px solid #f5f3f0' : 'none' }}>
+                    <div style={{ ...S.listDot(CAT_COLORS[r.category] || '#60a5fa'), width:8, height:8, flexShrink:0 }} />
+                    <div style={{ flex:1 }}>
+                      <div style={{ fontSize:13, fontWeight:500, color:'#2d2b38' }}>{r.name}</div>
+                      <div style={{ fontSize:11, color:'#9996a8', marginTop:2 }}>
+                        {r.frequency} · seen {r.count}× · last {r.lastDate}
+                        {!r.consistent && <span style={{ color:'#d97706', marginLeft:6 }}>variable amount</span>}
+                      </div>
+                    </div>
+                    <span style={{ fontSize:13, fontWeight:700, color:'#2d2b38' }}>
+                      {r.consistent ? AUD(r.avgAmt) : `~${AUD(r.avgAmt)}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
 
           {/* Transactions */}
           <div style={{ ...S.sectionHeader, marginTop: 24, marginBottom:14 }}>
