@@ -32,15 +32,39 @@ function parseCSVRow(line) {
   return result;
 }
 
+const MONTH_MAP = { jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12' };
+
 function parseDate(s) {
   if (!s) return null;
+  s = s.trim();
   let m;
+  // DD/MM/YYYY or D/M/YYYY
   m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  // YYYY-MM-DD
   m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return s;
+  // DD-MM-YYYY
   m = s.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
   if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  // DD Mon YYYY  (e.g. 08 Apr 2026)
+  m = s.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/);
+  if (m) {
+    const mo = MONTH_MAP[m[2].toLowerCase()];
+    if (mo) return `${m[3]}-${mo}-${m[1].padStart(2,'0')}`;
+  }
+  // Mon DD YYYY  (e.g. Apr 08 2026)
+  m = s.match(/^([A-Za-z]{3})\s+(\d{1,2})\s+(\d{4})$/);
+  if (m) {
+    const mo = MONTH_MAP[m[1].toLowerCase()];
+    if (mo) return `${m[3]}-${mo}-${m[2].padStart(2,'0')}`;
+  }
+  // DD/Mon/YYYY  (e.g. 08/Apr/2026)
+  m = s.match(/^(\d{1,2})\/([A-Za-z]{3})\/(\d{4})$/);
+  if (m) {
+    const mo = MONTH_MAP[m[2].toLowerCase()];
+    if (mo) return `${m[3]}-${mo}-${m[1].padStart(2,'0')}`;
+  }
   return null;
 }
 
@@ -121,8 +145,10 @@ function parseCSV(text) {
 
     let amount = 0;
     if (debitIdx !== -1 && creditIdx !== -1) {
-      const d = parseFloat(clean(row[debitIdx])) || 0;
-      const c = parseFloat(clean(row[creditIdx])) || 0;
+      const dRaw = clean(row[debitIdx] || '');
+      const cRaw = clean(row[creditIdx] || '');
+      const d = dRaw ? parseFloat(dRaw) || 0 : 0;
+      const c = cRaw ? parseFloat(cRaw) || 0 : 0;
       amount = c > 0 ? c : -d;
     } else {
       const idx = amtFallback !== -1 ? amtFallback : (dateIdx === 0 ? 1 : 0);
