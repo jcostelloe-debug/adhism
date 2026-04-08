@@ -65,32 +65,71 @@ function categorize(desc) {
 }
 
 function parseCSV(text) {
-  const lines = text.split('\n').filter(l => l.trim());
-  if (lines.length < 2) return [];
-  const cols = lines[0].toLowerCase().replace(/"/g, '').split(',').map(c => c.trim());
+  // Strip BOM and normalise line endings
+  const clean = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const allLines = clean.split('\n');
 
-  const dateIdx   = Math.max(0, cols.findIndex(c => c.includes('date')));
-  const descIdx   = cols.findIndex(c => ['description','details','narration','particulars','merchant name'].some(k => c.includes(k)));
-  const debitIdx  = cols.findIndex(c => ['debit','withdrawal'].includes(c));
-  const creditIdx = cols.findIndex(c => ['credit','deposit'].includes(c));
-  const amtIdx    = cols.findIndex(c => c === 'amount');
+  // Auto-detect delimiter (comma or semicolon)
+  const delim = (allLines.find(l => l.includes(';')) && !allLines[0].includes(',')) ? ';' : ',';
+
+  function splitRow(line) {
+    if (delim === ';') return line.split(';').map(c => c.replace(/^"|"$/g,'').trim());
+    return parseCSVRow(line);
+  }
+
+  // Find the header row — first row where a cell looks like a column heading
+  // (skip bank metadata rows that appear before the actual table)
+  const HEADER_HINTS = ['date','amount','debit','credit','description','narration','particulars','details','balance','transaction'];
+  let headerIdx = 0;
+  for (let i = 0; i < Math.min(allLines.length, 10); i++) {
+    const cells = splitRow(allLines[i]).map(c => c.toLowerCase().trim());
+    if (cells.filter(c => HEADER_HINTS.some(h => c.includes(h))).length >= 2) {
+      headerIdx = i;
+      break;
+    }
+  }
+
+  const lines = allLines.slice(headerIdx).filter(l => l.trim());
+  if (lines.length < 2) return [];
+
+  const cols = splitRow(lines[0]).map(c => c.toLowerCase().replace(/"/g,'').trim());
+
+  const dateIdx  = cols.findIndex(c => c.includes('date') || c === 'dt');
+  const descIdx  = cols.findIndex(c =>
+    ['description','details','narration','particulars','merchant name','transaction details','reference','memo'].some(k => c.includes(k))
+  );
+  const debitIdx  = cols.findIndex(c => ['debit','withdrawal','debit amount','withdrawals'].some(k => c.includes(k)));
+  const creditIdx = cols.findIndex(c => ['credit','deposit','credit amount','deposits'].some(k => c.includes(k)));
+  const amtIdx    = cols.findIndex(c => c === 'amount' || c === 'amount (aud)' || c === 'transaction amount');
+
+  // Fallback: if still no amount column, look for any column with 'amount'
+  const amtFallback = amtIdx === -1 ? cols.findIndex(c => c.includes('amount')) : amtIdx;
 
   const txns = [];
   for (let i = 1; i < lines.length; i++) {
-    const row = parseCSVRow(lines[i]);
+    const row = splitRow(lines[i]);
     if (!row || row.length < 2) continue;
+
+    const clean = (v) => (v || '').replace(/"/g,'').replace(/[$,\s]/g,'').trim();
+
     let amount = 0;
     if (debitIdx !== -1 && creditIdx !== -1) {
-      const d = parseFloat(row[debitIdx]?.replace(/[^0-9.-]/g,'') || '0') || 0;
-      const c = parseFloat(row[creditIdx]?.replace(/[^0-9.-]/g,'') || '0') || 0;
+      const d = parseFloat(clean(row[debitIdx])) || 0;
+      const c = parseFloat(clean(row[creditIdx])) || 0;
       amount = c > 0 ? c : -d;
-    } else if (amtIdx !== -1) {
-      amount = parseFloat(row[amtIdx]?.replace(/[^0-9.-]/g,'') || '0') || 0;
+    } else {
+      const idx = amtFallback !== -1 ? amtFallback : (dateIdx === 0 ? 1 : 0);
+      amount = parseFloat(clean(row[idx])) || 0;
     }
-    const date = parseDate(row[dateIdx]?.replace(/"/g,'').trim());
-    const description = row[descIdx >= 0 ? descIdx : 1]?.replace(/"/g,'').trim() || '';
-    if (!date || isNaN(amount) || !description) continue;
-    txns.push({ date, description, amount, category: categorize(description) });
+
+    const rawDate = (dateIdx >= 0 ? row[dateIdx] : row[0])?.replace(/"/g,'').trim();
+    const date = parseDate(rawDate);
+
+    // Description: use detected column, else try col 2, else col 1
+    const rawDesc = (descIdx >= 0 ? row[descIdx] : row[Math.min(2, row.length-1)])?.replace(/"/g,'').trim() || '';
+
+    if (!date || isNaN(amount) || !rawDesc) continue;
+    txns.push({ date, description: rawDesc, amount, category: categorize(rawDesc) });
   }
   return txns;
 }
@@ -864,6 +903,7 @@ function StatementsTab({ user, transactions, setTransactions }) {
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [showAll, setShowAll]     = useState(false);
+  const [parseError, setParseError] = useState(null);
 
   useEffect(() => {
     supabase.from('transactions').select('*').eq('user_id', user.id).order('date', { ascending: false }).limit(500)
@@ -872,9 +912,14 @@ function StatementsTab({ user, transactions, setTransactions }) {
 
   async function processFile(file) {
     setUploading(true);
+    setParseError(null);
     const text = await file.text();
     const parsed = parseCSV(text);
-    if (!parsed.length) { alert('Could not parse this CSV. Please export as CSV from your bank.'); setUploading(false); return; }
+    if (!parsed.length) {
+      setParseError(`Could not read "${file.name}". Make sure you exported it as CSV directly from your bank's app or website — not as PDF or Excel. If the issue continues, let us know which bank.`);
+      setUploading(false);
+      return;
+    }
     const rows = parsed.map(t => ({ ...t, user_id: user.id }));
     const { data } = await supabase.from('transactions').insert(rows).select();
     if (data) setTransactions(prev => [...data, ...prev]);
@@ -917,6 +962,17 @@ function StatementsTab({ user, transactions, setTransactions }) {
         <div style={S.uploadText}>{uploading ? 'Importing…' : 'Drop bank statement CSV here, or click to upload'}</div>
         <div style={S.uploadSub}>Supports CommBank, ANZ, Westpac, NAB, ING and most Australian bank CSV exports</div>
       </div>
+
+      {parseError && (
+        <div style={{ background:'#fff5f5', border:'1px solid #fecaca', borderRadius:10, padding:'12px 16px', marginBottom:16, fontSize:13, color:'#b91c1c', display:'flex', gap:10, alignItems:'flex-start' }}>
+          <span style={{ fontSize:16, flexShrink:0 }}>⚠️</span>
+          <div>
+            <div style={{ fontWeight:600, marginBottom:4 }}>Could not parse this file</div>
+            <div style={{ color:'#7f1d1d' }}>{parseError}</div>
+          </div>
+          <button onClick={() => setParseError(null)} style={{ marginLeft:'auto', background:'none', border:'none', cursor:'pointer', color:'#b91c1c', fontSize:16, flexShrink:0 }}>×</button>
+        </div>
+      )}
 
       {transactions.length > 0 && (
         <>
